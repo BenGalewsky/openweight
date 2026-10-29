@@ -23,7 +23,9 @@ db/IDOT.accdb
 db/Wetlands_IDOT_BE.accdb
 ```
 
-Requires: `git`, `uv`, `node` 22+, Docker, `mdbtools`, and the `claude` and/or `opencode` CLIs.
+Requires on the host: `git`, `uv`, and Docker (OrbStack or Docker Desktop). Agents and checks run
+in a per-evaluation sandbox container that carries everything else (Node, mdbtools, the `claude`
+and `opencode` CLIs). The models under test are listed in [matrix.toml](matrix.toml).
 
 ## Status
 

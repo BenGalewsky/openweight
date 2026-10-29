@@ -1,5 +1,35 @@
 {
   "$schema": "https://opencode.ai/config.json",
+  "provider": {
+    "lumen": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "Lumen",
+      "options": {
+        "baseURL": "https://lumen.ncsa.illinois.edu/v1",
+        "apiKey": "{env:LUMEN_API_KEY}"
+      },
+      "models": {
+        "glm-5.3": {
+          "name": "glm-5.3 via Lumen",
+          "limit": { "context": 524282, "output": 131072 },
+          "cost": { "input": 1.321413, "output": 4.248318 }
+        },
+        "qwen3.8-flash": {
+          "name": "qwen3.8-flash via Lumen",
+          "limit": { "context": 262138, "output": 131072 },
+          "cost": { "input": 0.142798, "output": 0.452902 }
+        },
+        "ornith-1.0-35b": {
+          "name": "ornith-1.0-35b via Lumen",
+          "limit": { "context": 262138, "output": 256000 },
+          "cost": { "input": 0.05, "output": 0.1 },
+          "modalities": { "input": ["text"], "output": ["text"] },
+          "tool_call": true,
+          "reasoning": true
+        }
+      }
+    }
+  },
   "mcp": {
     "servers": {
       "svelte": { "type": "remote", "url": "https://mcp.svelte.dev/mcp" }

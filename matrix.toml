@@ -1,0 +1,23 @@
+# Evaluation matrix: one branch per entry (see PLAN.md, "Evaluation matrix").
+
+[[eval]]
+harness = "claude"
+model = "claude-sonnet-5-5"
+effort = "high"
+
+[[eval]]
+harness = "claude"
+model = "claude-opus-5-5"
+effort = "high"
+
+[[eval]]
+harness = "opencode"
+model = "lumen/glm-5.3"
+
+[[eval]]
+harness = "opencode"
+model = "lumen/qwen3.8-flash"
+
+[[eval]]
+harness = "opencode"
+model = "lumen/ornith-1.0-35b"  # switch to ornith-1.5-35b once Lumen serves it
