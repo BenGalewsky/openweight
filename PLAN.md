@@ -97,15 +97,19 @@ workspaces/                     # gitignored: one standalone git repo per eval b
   `samples-redesign.md`) plus `access_db_schema.sql` copied from `db/`. This keeps framework code
   out of the agent's context and out of the diffs the reviewer sees, while giving every agent the
   design docs that steps 28 and 35 reference and the Access schema from the first step.
-- Each evaluation works in a **standalone git repository** at `workspaces/<branch-slug>/`
-  (`git init`, not `git worktree`). A worktree's `.git` is a pointer back into the main repo, which
+- Each evaluation works in a **standalone git repository** at `workspaces/<name>/`, where
+  `<name>` is `<harness>--<model-slug>` (e.g. `workspaces/opencode--lumen--glm-5.3/`), created with
+  `git init`, not `git worktree`. A worktree's `.git` is a pointer back into the main repo, which
   would both break inside the sandbox and expose `main`'s history; a separate repo contains only
-  the eval branch. After each step the runner fetches the branch into the main repo
-  (`git fetch workspaces/<slug> eval/...:eval/...`), so `main`'s clone holds every branch for review.
+  the eval branch. After each step the runner fetches the branch and its step tags into the main
+  repo (with `--prune`, so tags removed by a reset disappear there too), so `main`'s clone holds
+  every branch for review. If a workspace is lost, `openweight workspace open` restores it from the
+  main repo's branch and tags.
 - **Benchmark inputs.** PromptDB expects `IDOT.accdb` and `Wetlands_IDOT_BE.accdb` at the repo
   root. When the runner creates a workspace it places both from `db/` there as copy-on-write
-  clones (`cp -c` on APFS, plain copy elsewhere), so the large file costs no extra disk and the
-  agent can never modify the originals.
+  clones (`cp -c` on APFS, `cp --reflink=auto` on Linux, plain copy elsewhere), so the large file
+  costs no extra disk and the agent can never modify the originals. The copies are made `0644` so
+  the sandbox's agent user can read them whatever the originals' mode.
 - **Logger fixtures.** Every file in `data/` on `main` (`DIVER_49_5L_GW_20241002.CSV`,
   `INS_49_SW43_SW_20250924.csv`, `VuSitu_Low-Flow_*.csv` and its `.html` companion) is copied into
   the workspace's `data/`, where steps 23, 29, 36 and 37 expect them.
@@ -138,15 +142,15 @@ Every agent session and every objective check runs inside a container, never on 
 host only runs the `openweight` orchestrator, git bookkeeping, and MLflow logging. Docker here is
 OrbStack (linux/arm64).
 
-**Per evaluation** the runner starts two containers on a private network, `ow-<slug>`:
+**Per evaluation** the runner starts two containers on a private network, `ow-<name>`:
 
-- **`ow-<slug>-dind`** — a `docker:dind` daemon dedicated to this evaluation. The agent's
+- **`ow-<name>-dind`** — a `docker:dind` daemon dedicated to this evaluation. The agent's
   `docker compose up` (Postgres, RustFS from step 16 on) and `docker build` (steps 14, 16, 42)
   talk to this daemon, never to the host's. The host Docker socket is never mounted. It runs
   `--privileged` (required by dind), a contained trade-off: it can reach only its own storage
   volume and the private network.
-- **`ow-<slug>-agent`** — the `openweight-sandbox` image, started with
-  `--network container:ow-<slug>-dind` so it shares the dind container's network namespace.
+- **`ow-<name>-agent`** — the `openweight-sandbox` image, started with
+  `--network container:ow-<name>-dind` so it shares the dind container's network namespace.
   Ports that compose publishes are therefore on `localhost` inside the agent, which keeps
   PromptDB's `DATABASE_URL=postgresql://idot:idot@localhost:5432/idot` working unchanged, and
   parallel evaluations never clash on 5432/9000/3000.
@@ -162,7 +166,7 @@ those versions; the runner logs them as `harness_version`.
 
 | Host | Container | Mode |
 |------|-----------|------|
-| `workspaces/<slug>/` | `/workspace` (cwd) | read-write |
+| `workspaces/<name>/` | `/workspace` (cwd) | read-write |
 | `harness_config/` | `/harness_config` | read-only |
 
 Nothing else from the host is mounted: no home directory, SSH keys, git credentials, or the user's
@@ -201,8 +205,14 @@ Eval-Step: 1
 Eval-Run-Id: <mlflow run id>
 ```
 
+`Assisted-by` is the agent's own (PromptDB's conventions ask for it). The runner adds the `Eval-*`
+trailers by amending the agent's last commit, leaving its author and message otherwise untouched.
+When it commits leftover changes or an empty commit itself (see Runner), it writes the
+`Assisted-by` trailer too, as `openweight` with the content attributed to the agent.
+
 The runner also creates a lightweight tag `eval/<harness>/<model-slug>/step-01` per step so the
-reviewer can diff `step-(N-1)..step-N` exactly.
+reviewer can diff `step-(N-1)..step-N` exactly. The root commit is tagged `step-00`, so step 1 is
+no special case.
 
 The next step to run = highest `Eval-Step` trailer on the branch + 1.
 

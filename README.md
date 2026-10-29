@@ -32,10 +32,14 @@ and `opencode` CLIs). The models under test are listed in [matrix.toml](matrix.t
 ```bash
 uv run openweight prompts list              # the 42 parsed steps by phase
 uv run openweight prompts show 12 --harness claude --model claude-sonnet-5-5
+uv run openweight workspace open --harness claude --model claude-sonnet-5-5 --effort high
+uv run openweight workspace list            # eval branches and the next step of each
 uv run pytest                               # framework tests
 ```
 
 ## Status
 
-Milestone 1 (skeleton and PromptDB parsing) is done. The runner, sandbox, and reviewer are not
-implemented yet; see the milestones in [PLAN.md](PLAN.md).
+Milestones 1 (skeleton and PromptDB parsing) and 2 (eval branches and workspaces) are done.
+`workspace open` creates the orphan eval branch in `workspaces/<harness>--<model-slug>/` with the
+benchmark inputs in place. The runner, sandbox, and reviewer are not implemented yet; see the
+milestones in [PLAN.md](PLAN.md).
