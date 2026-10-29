@@ -13,7 +13,7 @@ data/                                # NDJSON seed exports + sample logger files
 plans/                               # design docs (access_db_schema.sql, ptd_review_window.md, ...)
 scripts/                             # one-off Python helpers (Access export)
 scratch/                             # dagster CSV output (gitignored)
-web/                                 # SvelteKit 2 / Svelte 5 / Tailwind 4 / Drizzle app
+web/                                 # SvelteKit 3 / Svelte 5 / Tailwind 4 / Drizzle app
 isgs_dagster/                        # Dagster 1.13 ingestion project (uv, Python)
 Dockerfile, docker-compose.yml       # web image (builder/seeder/runtime) + local stack
 .github/workflows/release-docker.yml
@@ -21,7 +21,7 @@ Reverted history (do not reproduce): f624a8f lab-results Dagster asset, 5a59785 
 
 Phase 1 — Web app foundation (SQLite era)
 Step 1 — Scaffold the SvelteKit wetlands app (459fbc1)
-Create a SvelteKit 2 + Svelte 5 + TypeScript app in web/ named idot-wetlands, styled with Tailwind CSS v4 (@tailwindcss/vite, src/app.css imports tailwind). Use Drizzle ORM with a local SQLite file (better-sqlite3, drizzle.config.ts, src/lib/server/db.ts, src/lib/server/schema.ts) and scripts dev, build, check, db:push, db:studio, db:seed. Add ESLint 9 + Prettier (with svelte plugin; tabs, single quotes). The source data lives in IDOT.accdb / Wetlands_IDOT_BE.accdb (Microsoft Access). Add scripts/ with a small Python project (pyproject.toml, main.py using pyodbc + MDBTools) that exports Access tables to NDJSON files in data/. Define a first projects table (ISGS number, IDOT name, ISGS name, begin/end dates, FA number, county, type, seq code) plus a LUT_SiteType lookup, a web/scripts/seed.ts that loads NDJSON from data/ idempotently (onConflictDoNothing, chunked inserts, a parseDate helper that converts MM/DD/YY to ISO), and a home page +page.server.ts / +page.svelte listing projects in a table. Add .gitignore, .dockerignore, web/.env.example, and a README.
+Create a SvelteKit 3.1 + Svelte 5 + TypeScript app in web/ named idot-wetlands, styled with Tailwind CSS v4 (@tailwindcss/vite, src/app.css imports tailwind). Use Drizzle ORM with a local SQLite file (better-sqlite3, drizzle.config.ts, src/lib/server/db.ts, src/lib/server/schema.ts) and scripts dev, build, check, db:push, db:studio, db:seed. Add ESLint 9 + Prettier (with svelte plugin; tabs, single quotes). The source data lives in IDOT.accdb / Wetlands_IDOT_BE.accdb (Microsoft Access). Add scripts/ with a small uv-managed Python project (pyproject.toml, .python-version pinned to 3.13, main.py) that exports Access tables to NDJSON files in data/ by calling the MDBTools command-line tools (mdb-tables, mdb-json) via subprocess. Do not use pyodbc: no MDBTools ODBC driver is installed. Define a first projects table (ISGS number, IDOT name, ISGS name, begin/end dates, FA number, county, type, seq code) plus a LUT_SiteType lookup, a web/scripts/seed.ts that loads NDJSON from data/ idempotently (onConflictDoNothing, chunked inserts, a parseDate helper that converts MM/DD/YY to ISO), and a home page +page.server.ts / +page.svelte listing projects in a table. Add .gitignore, .dockerignore, web/.env.example, and a README.
 
 Step 2 — University of Illinois branding (8c6e153)
 Apply University of Illinois brand guidelines to the site: Illinois Blue (#13294B) and Orange (#FF5F05) as Tailwind theme tokens in app.css, brand fonts, a branded header/footer in routes/+layout.svelte, and consistent table/heading styling on the home page.
@@ -84,7 +84,7 @@ Add an import_queue table (id, station_visit_id FK, uri, timestamp default now) 
 
 Phase 4 — Dagster ingestion
 Step 21 — isgs_dagster project (602e725, 9f837aa)
-Create isgs_dagster/ as a uv-managed Dagster 1.13.6 project (hatchling, [tool.dg] root_module isgs_dagster, .python-version, .env.example, README). Add resources.py with PostgresResource (psycopg2, DATABASE_URL via dg.EnvVar) and ObjectStoreResource (boto3, S3_ENDPOINT, S3_ACCESS_KEY, S3_SECRET_KEY), definitions.py, and a stub data_logger asset. Add the seeder's CREATE DATABASE dagster step (a second DB reserved for Dagster). Then add a sensor (station_visit_import_queue_sensor, 30 s interval, cursor on the queue timestamp, one RunRequest per new row with run_key=str(row_id)) and an imported_file asset job that runs data_logger.
+Create isgs_dagster/ as a uv-managed Dagster 1.13.6 project (hatchling, [tool.dg] root_module isgs_dagster, .python-version pinned to 3.13 — the default python3 here is 3.15, which lacks wheels for some Dagster dependencies — .env.example, README). Add resources.py with PostgresResource (psycopg2, DATABASE_URL via dg.EnvVar) and ObjectStoreResource (boto3, S3_ENDPOINT, S3_ACCESS_KEY, S3_SECRET_KEY), definitions.py, and a stub data_logger asset. Add the seeder's CREATE DATABASE dagster step (a second DB reserved for Dagster). Then add a sensor (station_visit_import_queue_sensor, 30 s interval, cursor on the queue timestamp, one RunRequest per new row with run_key=str(row_id)) and an imported_file asset job that runs data_logger.
 
 Step 22 — PTD table and CRUD UI (c82cce0)
 Add a pressure_temperature_depth table (station_visit_id FK, pressure, temperature, depth as real) and inline CRUD UI for those rows on the station-visit view.
