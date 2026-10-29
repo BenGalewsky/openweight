@@ -27,6 +27,15 @@ Requires on the host: `git`, `uv`, and Docker (OrbStack or Docker Desktop). Agen
 in a per-evaluation sandbox container that carries everything else (Node, mdbtools, the `claude`
 and `opencode` CLIs). The models under test are listed in [matrix.toml](matrix.toml).
 
+## Usage
+
+```bash
+uv run openweight prompts list              # the 42 parsed steps by phase
+uv run openweight prompts show 12 --harness claude --model claude-sonnet-5-5
+uv run pytest                               # framework tests
+```
+
 ## Status
 
-Planning. The runner and reviewer are not implemented yet.
+Milestone 1 (skeleton and PromptDB parsing) is done. The runner, sandbox, and reviewer are not
+implemented yet; see the milestones in [PLAN.md](PLAN.md).

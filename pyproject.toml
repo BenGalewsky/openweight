@@ -1,0 +1,37 @@
+[project]
+name = "openweight"
+version = "0.1.0"
+description = "Evaluate coding harnesses and models on a multi-step application build"
+readme = "README.md"
+authors = [
+    { name = "Ben Galewsky", email = "ben@peartreestudio.net" }
+]
+requires-python = ">=3.13"
+dependencies = [
+    "mlflow>=3.17.2",
+    "python-dotenv>=1.2.4",
+    "typer>=0.27.3",
+]
+
+[project.scripts]
+openweight = "openweight.cli:app"
+
+[build-system]
+requires = ["uv_build>=0.11.23,<0.12.0"]
+build-backend = "uv_build"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+extend-exclude = ["harness_config"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.2.0",
+    "ruff>=0.17.3",
+]

@@ -366,8 +366,8 @@ To resolve before milestone 4.
    harnesses). OK with fresh-per-step?
 3. **Failure policy.** If step N fails or breaks the build, keep going (current default), stop, or
    let the agent retry once with the check output?
-4. **MLflow server.** Is the tracking server new enough for GenAI traces and assessments
-   (MLflow ≥ 3.4)?
+4. **MLflow server.** *Resolved:* the tracking server runs MLflow 3.17, which supports GenAI traces
+   and assessments (≥ 3.4 needed); the client is pinned to `mlflow>=3.17.2` to match.
 5. **Judge model and cadence.** Which frontier model is the reviewer (and should we use two judges
    from different vendors to reduce self-preference bias, since Claude would be judging Claude)?
    Review every step, only phase boundaries, or only the final state?
