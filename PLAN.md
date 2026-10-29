@@ -46,8 +46,11 @@ main
 │       └── judge.py            # frontier-model review -> MLflow assessments
 ├── harness_config/
 │   ├── claude.settings.json    # MLflow tracing hooks + permissions for headless runs
-│   ├── opencode.json           # @mlflow/opencode plugin + permissions
-│   └── mcp.json                # Svelte MCP server (required by the prompts)
+│   ├── opencode.json           # @mlflow/opencode plugin + permissions, Svelte MCP, Dagster skills
+│   ├── mcp.json                # Svelte MCP server (required by the prompts)
+│   └── plugins/                # vendored Claude Code plugins (dagster-io/skills @ a9ba4bb, Apache-2.0)
+│       ├── dagster-expert/     #   loaded by Claude via --plugin-dir, by OpenCode via "skills" paths
+│       └── dignified-python/
 ├── data/                       # tracked: logger fixtures (Diver, Aqua TROLL, VuSitu) given to agents
 │                               #   Access JSON extracts are never stored here (gitignored)
 └── tests/                      # unit tests for the framework itself
@@ -88,8 +91,13 @@ workspaces/                     # gitignored: one git worktree per eval branch
   step tells the agent the file was supplied, so it should verify it against the databases rather
   than regenerate it.
 - Harness configuration is **not** written into the worktree: Claude Code gets it via
-  `--settings` / `--mcp-config`, OpenCode via the `OPENCODE_CONFIG` env var. Nothing
-  framework-specific leaks into commits.
+  `--settings` / `--mcp-config` / `--plugin-dir`, OpenCode via the `OPENCODE_CONFIG` env var.
+  Nothing framework-specific leaks into commits.
+- Both harnesses get the same Svelte MCP server and the same pinned `dagster-expert` and
+  `dignified-python` skills from `harness_config/`, rather than whatever is installed in the
+  user's own setup. OpenCode resolves relative `skills` paths against the cwd (the worktree), so
+  `opencode.json` uses `{env:OPENWEIGHT_HARNESS_CONFIG}`, which the runner sets to the absolute
+  path of `harness_config/`.
 
 ### Tracking progress in git
 
@@ -134,9 +142,12 @@ For each step:
 3. Start an MLflow run (nested under the branch's parent run) and invoke the harness:
    - **Claude Code:** `claude -p "<prompt>" --model <model> --output-format stream-json
      --settings harness_config/claude.settings.json --mcp-config harness_config/mcp.json
+     --strict-mcp-config --plugin-dir harness_config/plugins
      --permission-mode bypassPermissions --max-budget-usd <cap>`, cwd = worktree.
+     (`--strict-mcp-config` keeps the user's claude.ai connectors out of the run.)
    - **OpenCode:** `opencode run --standalone --model <provider/model> --format json --auto
-     "<prompt>"`, cwd = worktree, `OPENCODE_CONFIG=harness_config/opencode.json`.
+     "<prompt>"`, cwd = worktree, `OPENCODE_CONFIG=harness_config/opencode.json`,
+     `OPENWEIGHT_HARNESS_CONFIG=<abs path to harness_config>`.
    - Fresh session per step (the previous steps' context lives in the code and git history,
      as it would for a human developer picking up the next ticket).
    - Wall-clock timeout per step (default 60 min) plus a cost cap where the harness supports it.

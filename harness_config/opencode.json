@@ -1,0 +1,12 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "servers": {
+      "svelte": { "type": "remote", "url": "https://mcp.svelte.dev/mcp" }
+    }
+  },
+  "skills": [
+    "{env:OPENWEIGHT_HARNESS_CONFIG}/plugins/dagster-expert/skills",
+    "{env:OPENWEIGHT_HARNESS_CONFIG}/plugins/dignified-python/skills"
+  ]
+}
