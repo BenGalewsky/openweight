@@ -304,3 +304,16 @@ def test_cli_open_and_list(repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
 
     bad = runner.invoke(app, ["workspace", "open", "--harness", "cursor", "--model", "x"])
     assert bad.exit_code != 0
+
+
+@pytest.mark.parametrize("evaluation", [CLAUDE, OPENCODE])
+def test_workspace_name_from_branch(evaluation: Evaluation) -> None:
+    assert branches.workspace_name(evaluation.branch) == evaluation.name
+
+
+@pytest.mark.parametrize(
+    "branch", ["main", "eval/cursor/x", "eval/claude", "eval/claude/", "eval/claude/a/b"]
+)
+def test_workspace_name_rejects_other_branches(branch: str) -> None:
+    with pytest.raises(ValueError, match="not an eval branch"):
+        branches.workspace_name(branch)

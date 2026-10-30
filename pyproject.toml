@@ -22,6 +22,7 @@ build-backend = "uv_build"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = ["docker: starts sandbox containers (needs Docker and the image; run with --docker)"]
 
 [tool.ruff]
 line-length = 100

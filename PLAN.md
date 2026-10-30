@@ -33,7 +33,7 @@ main
 ├── matrix.toml                 # the (harness, model, effort) pairs to evaluate
 ├── sandbox/
 │   ├── Dockerfile              # agent sandbox image: toolchain + pinned claude/opencode CLIs
-│   └── entrypoint.sh
+│   └── entrypoint.sh           #   waits for the evaluation's dind daemon
 ├── pyproject.toml / uv.lock    # uv-managed Python project
 ├── src/openweight/
 │   ├── cli.py                  # `openweight` entrypoint (typer)
@@ -148,19 +148,28 @@ OrbStack (linux/arm64).
   `docker compose up` (Postgres, RustFS from step 16 on) and `docker build` (steps 14, 16, 42)
   talk to this daemon, never to the host's. The host Docker socket is never mounted. It runs
   `--privileged` (required by dind), a contained trade-off: it can reach only its own storage
-  volume and the private network.
+  volume (`ow-<name>-dind`) and the private network. `dockerd` listens on its unix socket and on
+  `tcp://127.0.0.1:2375` only; plain TCP is safe there because the agent is the only other process
+  in that network namespace, and it avoids sharing a root-owned socket with the non-root agent.
 - **`ow-<name>-agent`** — the `openweight-sandbox` image, started with
   `--network container:ow-<name>-dind` so it shares the dind container's network namespace.
   Ports that compose publishes are therefore on `localhost` inside the agent, which keeps
   PromptDB's `DATABASE_URL=postgresql://idot:idot@localhost:5432/idot` working unchanged, and
-  parallel evaluations never clash on 5432/9000/3000.
+  parallel evaluations never clash on 5432/9000/3000. The image sets
+  `DOCKER_HOST=tcp://127.0.0.1:2375`.
 
-**Image (`openweight-sandbox`)** built from `sandbox/Dockerfile`: Debian, Node 22, `uv` (which
-fetches Python 3.13 on demand, as steps 1 and 21 require), `mdbtools` (`mdb-tables`, `mdb-json`),
-`postgresql-client`, `git`, the Docker CLI with compose and buildx plugins, `mlflow` (used by the
-Claude Code tracing hooks), and the harness CLIs pinned to the versions on the host
-(`claude` 2.1.312, `opencode` 2.0.23) plus the `@mlflow/opencode` plugin. The image tag records
-those versions; the runner logs them as `harness_version`.
+**Image (`openweight-sandbox`)** built from `sandbox/Dockerfile` by `openweight sandbox build`:
+Debian 13 with Node 22 (`node:22-trixie-slim`), `uv` with Python 3.13 preinstalled (as steps 1
+and 21 require), `mdbtools` (`mdb-tables`, `mdb-json`), `postgresql-client`, `git`, the Docker CLI
+with compose and buildx plugins, `mlflow` (its `mlflow autolog claude stop-hook` CLI is the Claude
+Code tracing hook; `mlflow-skinny` lacks it, so this is the full package), and the harness CLIs
+pinned to the versions on the host (`claude` 2.1.312, `opencode` 2.0.23) plus the
+`@mlflow/opencode` plugin. OpenCode 2 is published on npm as `@opencode/cli` (the `opencode-ai`
+package stops at 1.x). The Dockerfile's `ARG *_VERSION` defaults are the only place the pins are
+written; `sandbox.py` reads them to name the tag (`openweight-sandbox:claude-2.1.312-opencode-2.0.23`)
+and to report `harness_version`, which the runner logs. Auto-updaters are disabled.
+`@mlflow/opencode` 0.4.0 declares a peer dependency on `@opencode-ai/plugin` ^1; whether it works
+with OpenCode 2 is checked in milestone 5.
 
 **Mounts**
 
@@ -175,7 +184,9 @@ workspace (see Branch model), so the originals in `db/` and `data/` are out of r
 
 **Inside the sandbox**
 
-- Runs as a non-root `agent` user with git identity `openweight-agent`.
+- Runs as a non-root `agent` user (uid 1000, build arg `AGENT_UID`) with git identity
+  `openweight-agent` and `safe.directory=*`, so git accepts the bind-mounted workspace whatever
+  uid owns it on the host. (OrbStack maps bind-mount ownership to the accessing user anyway.)
 - Permission prompts are disabled, which is what the container boundary is for:
   `claude --dangerously-skip-permissions`, `opencode run --auto` with an allow-all permission
   block in `opencode.json`.
@@ -183,15 +194,26 @@ workspace (see Branch model), so the originals in `db/` and `data/` are out of r
   from `claude setup-token`, as there is no Anthropic API key),
   `LUMEN_API_KEY` (OpenCode runs only), the `MLFLOW_*` variables, the step's MLflow run id,
   and `OPENWEIGHT_HARNESS_CONFIG=/harness_config`. Each harness sees only its own model credential.
+  Credentials are passed per `docker exec` as `--env NAME` with the value in docker's own
+  environment, so they never appear in process arguments or in `docker inspect`.
 - Network egress is open (npm, PyPI, Docker Hub, the model APIs, the Svelte MCP server, MLflow).
   An allowlisting proxy can be added later if needed.
 - Resource limits per evaluation (defaults: 4 CPUs, 8 GB for the agent, 4 GB for dind).
 
 **Lifecycle.** The containers start before step 1 and persist across steps, so the agent's Postgres
 data, `node_modules`, and uv caches survive between sessions as they would on a developer's
-machine. Each step is a `docker exec` into the agent container. `openweight sandbox down <branch>`
-removes the containers, network, and dind volume; `openweight sandbox shell <branch>` opens a shell
-for debugging.
+machine. Each step is a `docker exec` into the agent container; a step timeout runs the command
+under `timeout` inside the container, so the agent process itself is killed. All resources carry
+the label `openweight.evaluation=<name>`.
+
+- `openweight sandbox up <branch>` starts the sandbox, creating whatever is missing. It is safe to
+  run before every step: running containers are left alone, a stopped dind is started and the agent
+  restarted to rejoin its network namespace, and the agent container is recreated if dind was
+  recreated or the image tag changed.
+- `openweight sandbox down <branch>` removes the containers, network, and dind volume (the
+  workspace is kept).
+- `openweight sandbox shell <branch> [command...]` opens a shell (or runs a command) as the agent.
+- `openweight sandbox list` shows every evaluation's containers on the Docker host.
 
 ### Tracking progress in git
 
@@ -354,7 +376,8 @@ uv run openweight review --all            # every eval/* branch, for a leaderboa
 2. **Branches** — workspace repo + orphan branch creation, input copying, trailer parsing, step
    tags, fetching branches back into the main repo.
 3. **Sandbox** — `sandbox/Dockerfile`, dind + agent container lifecycle, `sandbox shell`/`down`;
-   verify compose-published Postgres is reachable on `localhost` from the agent.
+   verify compose-published Postgres is reachable on `localhost` from the agent
+   (`pytest --docker` does, along with mounts, isolation from the host daemon, env and timeouts).
 4. **Claude harness** — run step 1 end to end with Claude Code; MLflow run + trace visible on the
    server.
 5. **OpenCode harness** — same for OpenCode; normalize its JSON events into the same

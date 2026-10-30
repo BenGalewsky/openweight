@@ -5,18 +5,21 @@ from typing import Annotated
 
 import typer
 
-from openweight import branches, promptdb
+from openweight import branches, promptdb, sandbox
 
 app = typer.Typer(no_args_is_help=True, help="Evaluate coding harnesses and models on PromptDB.")
 prompts_app = typer.Typer(no_args_is_help=True, help="Inspect the parsed benchmark prompts.")
 app.add_typer(prompts_app, name="prompts")
 workspace_app = typer.Typer(no_args_is_help=True, help="Manage evaluation branches and workspaces.")
 app.add_typer(workspace_app, name="workspace")
+sandbox_app = typer.Typer(no_args_is_help=True, help="Manage per-evaluation sandbox containers.")
+app.add_typer(sandbox_app, name="sandbox")
 
 PromptDBPath = Annotated[
     Path,
     typer.Option("--promptdb", exists=True, dir_okay=False, help="Path to PromptDB.md."),
 ]
+Branch = Annotated[str, typer.Argument(help="Eval branch, e.g. eval/opencode/lumen--glm-5.3.")]
 IncludeStep43 = Annotated[
     bool,
     typer.Option("--include-step-43", help="Include the 'Not yet committed' follow-up step."),
@@ -95,3 +98,81 @@ def list_workspaces() -> None:
         typer.echo("no eval branches")
     for name in names:
         typer.echo(f"{name}  next step {branches.next_step(repo, name)}")
+
+
+def _sandbox(branch: str) -> sandbox.Sandbox:
+    try:
+        return sandbox.Sandbox.for_branch(branches.repo_root(Path.cwd()), branch)
+    except ValueError as e:
+        raise typer.BadParameter(str(e), param_hint="BRANCH") from None
+
+
+def _fail(e: Exception) -> typer.Exit:
+    typer.echo(f"error: {e}", err=True)
+    return typer.Exit(1)
+
+
+@sandbox_app.command("build")
+def build_sandbox(
+    pull: Annotated[bool, typer.Option(help="Pull newer base images first.")] = False,
+) -> None:
+    """Build the sandbox image from sandbox/Dockerfile."""
+    repo = branches.repo_root(Path.cwd())
+    try:
+        sandbox.check_docker()
+        sandbox.build_image(repo / "sandbox", pull=pull)
+    except sandbox.DockerError as e:
+        raise _fail(e) from None
+    typer.echo(f"built {sandbox.image_tag()}")
+
+
+@sandbox_app.command("up")
+def sandbox_up(branch: Branch) -> None:
+    """Start an evaluation's sandbox (dind and agent containers), creating what is missing."""
+    box = _sandbox(branch)
+    try:
+        actions = box.up()
+    except (sandbox.DockerError, sandbox.SandboxError) as e:
+        raise _fail(e) from None
+    for action in actions or [f"sandbox {box.name} already running"]:
+        typer.echo(action)
+
+
+@sandbox_app.command("down")
+def sandbox_down(branch: Branch) -> None:
+    """Remove an evaluation's containers, network, and dind volume (the workspace is kept)."""
+    box = _sandbox(branch)
+    try:
+        removed = box.down()
+    except sandbox.DockerError as e:
+        raise _fail(e) from None
+    for item in removed or [f"no sandbox {box.name}"]:
+        typer.echo(f"removed {item}" if removed else item)
+
+
+@sandbox_app.command(
+    "shell", context_settings={"allow_extra_args": True, "ignore_unknown_options": True}
+)
+def sandbox_shell(ctx: typer.Context, branch: Branch) -> None:
+    """Open a shell in the agent container (or run the command given after the branch)."""
+    box = _sandbox(branch)
+    try:
+        code = box.shell(ctx.args) if ctx.args else box.shell()
+    except (sandbox.DockerError, sandbox.SandboxError) as e:
+        raise _fail(e) from None
+    raise typer.Exit(code)
+
+
+@sandbox_app.command("list")
+def list_sandboxes() -> None:
+    """List the sandboxes on this Docker host and the state of their containers."""
+    try:
+        sandbox.check_docker()
+        found = sandbox.list_sandboxes()
+    except sandbox.DockerError as e:
+        raise _fail(e) from None
+    if not found:
+        typer.echo("no sandboxes")
+    for name, containers in sorted(found.items()):
+        states = "  ".join(f"{c} {state}" for c, state in sorted(containers.items()))
+        typer.echo(f"{name}  {states}")

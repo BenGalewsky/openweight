@@ -34,12 +34,19 @@ uv run openweight prompts list              # the 42 parsed steps by phase
 uv run openweight prompts show 12 --harness claude --model claude-sonnet-5-5
 uv run openweight workspace open --harness claude --model claude-sonnet-5-5 --effort high
 uv run openweight workspace list            # eval branches and the next step of each
+uv run openweight sandbox build             # build the agent sandbox image (once per pin change)
+uv run openweight sandbox up eval/claude/claude-sonnet-5-5-high
+uv run openweight sandbox shell eval/claude/claude-sonnet-5-5-high
+uv run openweight sandbox down eval/claude/claude-sonnet-5-5-high
+uv run openweight sandbox list              # sandboxes on this Docker host
 uv run pytest                               # framework tests
+uv run pytest --docker                      # also start real sandbox containers
 ```
 
 ## Status
 
-Milestones 1 (skeleton and PromptDB parsing) and 2 (eval branches and workspaces) are done.
-`workspace open` creates the orphan eval branch in `workspaces/<harness>--<model-slug>/` with the
-benchmark inputs in place. The runner, sandbox, and reviewer are not implemented yet; see the
-milestones in [PLAN.md](PLAN.md).
+Milestones 1 (skeleton and PromptDB parsing), 2 (eval branches and workspaces), and 3 (sandbox)
+are done. `workspace open` creates the orphan eval branch in `workspaces/<harness>--<model-slug>/`
+with the benchmark inputs in place, and `sandbox up` starts that evaluation's agent container and
+private Docker daemon around it. The runner, harness drivers, and reviewer are not implemented yet;
+see the milestones in [PLAN.md](PLAN.md).

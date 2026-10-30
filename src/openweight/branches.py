@@ -369,8 +369,21 @@ class Workspace:
         self._runner_git("commit", "--quiet", "--no-verify", *args, "-m", message)
 
 
+def workspace_name(branch: str) -> str:
+    """The flat name (`Evaluation.name`) of an ``eval/<harness>/<model-slug>`` branch."""
+    prefix, _, rest = branch.partition("/")
+    harness, _, slug = rest.partition("/")
+    if prefix != "eval" or harness not in HARNESSES or not slug or "/" in slug:
+        raise ValueError(f"not an eval branch: {branch!r} (expected eval/<harness>/<model-slug>)")
+    return f"{harness}--{slug}"
+
+
+def workspace_dir(repo: Path, name: str) -> Path:
+    return repo / "workspaces" / name
+
+
 def workspace_path(repo: Path, evaluation: Evaluation) -> Path:
-    return repo / "workspaces" / evaluation.name
+    return workspace_dir(repo, evaluation.name)
 
 
 def _refspecs(evaluation: Evaluation) -> list[str]:
