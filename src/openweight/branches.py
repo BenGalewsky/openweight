@@ -96,6 +96,14 @@ class StepRecord:
     agent_committed: bool
 
 
+@dataclass(frozen=True)
+class Checkpoint:
+    """A workspace state to return to: HEAD plus a stash commit of any uncommitted changes."""
+
+    head: str
+    changes: str | None
+
+
 def run_git(cwd: Path, *args: str) -> subprocess.CompletedProcess[str]:
     """Run git in ``cwd`` without checking the exit status.
 
@@ -313,6 +321,28 @@ class Workspace:
         if later:
             self.git("tag", "--delete", *later)
 
+    def checkpoint(self) -> Checkpoint:
+        """Snapshot HEAD and any uncommitted changes (untracked files included) for `restore`."""
+        if self.is_clean():
+            return Checkpoint(self.head(), None)
+        self.git("add", "--all")
+        changes = self._runner_git("stash", "create").strip()
+        self.git("reset", "--quiet")
+        return Checkpoint(self.head(), changes)
+
+    def restore(self, checkpoint: Checkpoint) -> None:
+        """Return to ``checkpoint``, discarding commits and changes made since.
+
+        Ignored files are kept, as with `reset_to`.
+        """
+        if self.current_branch() != self.branch:
+            self.git("checkout", "--force", self.branch)
+        self.git("reset", "--hard", checkpoint.head)
+        self.git("clean", "-fd")
+        if checkpoint.changes:
+            self.git("stash", "apply", "--quiet", checkpoint.changes)
+            self.git("reset", "--quiet")
+
     def record_step(self, step: int, run_id: str | None = None) -> StepRecord:
         """Make ``step``'s work a tagged step commit carrying the eval trailers.
 
@@ -359,6 +389,23 @@ class Workspace:
         return StepRecord(
             sha=self.head(), tag=tag, agent_commits=agent_commits, agent_committed=agent_commits > 0
         )
+
+    def _step_range(self, step: int) -> str:
+        return f"refs/tags/{self.evaluation.tag(step - 1)}..refs/tags/{self.evaluation.tag(step)}"
+
+    def diff(self, step: int) -> str:
+        """The diff from the previous step's tag to ``step``'s tag."""
+        return self.git("diff", self._step_range(step))
+
+    def diff_stats(self, step: int) -> dict[str, int]:
+        """Files changed and lines added/removed by ``step`` (binary files count as files only)."""
+        added = removed = files = 0
+        for line in self.git("diff", "--numstat", self._step_range(step)).splitlines():
+            plus, minus, _ = line.split("\t", 2)
+            files += 1
+            added += int(plus) if plus.isdigit() else 0
+            removed += int(minus) if minus.isdigit() else 0
+        return {"files_changed": files, "lines_added": added, "lines_removed": removed}
 
     def _runner_commit(self, subject: str, trailers: list[str], allow_empty: bool = False) -> None:
         """Commit the index as the runner, attributing the content to the agent under test."""

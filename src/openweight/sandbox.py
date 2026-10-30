@@ -22,6 +22,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from functools import cache
 from pathlib import Path
+from typing import IO
 
 from openweight import branches
 
@@ -88,6 +89,10 @@ def check_docker() -> None:
 
 def image_exists(tag: str) -> bool:
     return docker("image", "inspect", tag, check=False).returncode == 0
+
+
+def image_id(tag: str) -> str:
+    return docker("image", "inspect", "--format", "{{.Id}}", tag).stdout.strip()
 
 
 def build_image(context: Path, tag: str | None = None, pull: bool = False) -> None:
@@ -241,8 +246,9 @@ class Sandbox:
 
         agent_state = self.state(self.agent)
         if agent_state is not None:
-            image = docker("container", "inspect", "--format", "{{.Config.Image}}", self.agent)
-            stale = image.stdout.strip() != self.image
+            # Compared by id, not tag: the tag names only the CLI pins, and a rebuild keeps it.
+            image = docker("container", "inspect", "--format", "{{.Image}}", self.agent)
+            stale = image.stdout.strip() != image_id(self.image)
             if stale or dind_state is None:
                 docker("rm", "--force", self.agent)
                 actions.append(f"removed {self.agent}" + (" (image changed)" if stale else ""))
@@ -295,11 +301,13 @@ class Sandbox:
         env: Mapping[str, str] | None = None,
         timeout: float | None = None,
         workdir: str = WORKSPACE_MOUNT,
+        stdout: IO[str] | None = None,
     ) -> subprocess.CompletedProcess[str]:
         """Run ``command`` as the agent user and capture its output. Does not check the exit code.
 
         With ``timeout`` (seconds) the command runs under ``timeout`` inside the container, so it
         is the command that gets killed, not just ``docker exec``; it then exits `TIMEOUT_EXIT`.
+        With ``stdout`` the command's output is written there as it arrives instead of captured.
         """
         self._require_up()
         env = dict(env or {})
@@ -307,7 +315,8 @@ class Sandbox:
             command = ["timeout", "--kill-after=10", f"{timeout:g}", *command]
         return subprocess.run(
             ["docker", *self.exec_args(command, list(env), workdir=workdir)],
-            capture_output=True,
+            stdout=stdout or subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
             env=os.environ | env,
             check=False,

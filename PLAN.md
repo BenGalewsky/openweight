@@ -44,13 +44,14 @@ main
 │   │   ├── base.py             # Harness protocol + StepResult
 │   │   ├── claude.py           # `claude -p` driver
 │   │   └── opencode.py         # `opencode run` driver
+│   ├── runner.py               # step loop: sandbox exec, step commits, MLflow logging
 │   ├── checks.py               # objective checks run after each step
 │   ├── tracking.py             # MLflow experiment/run/trace helpers
 │   └── review/
 │       ├── rubric.py           # scoring rubric + judge prompts
 │       └── judge.py            # frontier-model review -> MLflow assessments
 ├── harness_config/
-│   ├── claude.settings.json    # MLflow tracing hooks + permissions for headless runs
+│   ├── claude.settings.json    # enables MLflow tracing, turns off commit attribution
 │   ├── opencode.json           # @mlflow/opencode plugin + permissions, Svelte MCP, Dagster skills
 │   ├── mcp.json                # Svelte MCP server (required by the prompts)
 │   └── plugins/                # vendored Claude Code plugins (dagster-io/skills @ a9ba4bb, Apache-2.0)
@@ -92,6 +93,10 @@ workspaces/                     # gitignored: one standalone git repo per eval b
   `--` so OpenCode `provider/model` ids are valid ref names, and appends `-<effort>` when an
   effort level is set.
   (The `eval/` prefix avoids ref conflicts such as `claude` vs `claude/...`.)
+- One run per pair: steps are not repeated to average out non-determinism, so branch names carry
+  no run suffix.
+- Branches stay local. The main repo has no remote and the runner never pushes `eval/*` branches
+  or step tags anywhere.
 - Each branch is an **orphan** branch whose root commit (`chore(eval): benchmark context`) contains
   only the `plans/` directory: every file in `plans/` on `main` (`ptd_review_window.md`,
   `samples-redesign.md`) plus `access_db_schema.sql` copied from `db/`. This keeps framework code
@@ -161,8 +166,8 @@ OrbStack (linux/arm64).
 **Image (`openweight-sandbox`)** built from `sandbox/Dockerfile` by `openweight sandbox build`:
 Debian 13 with Node 22 (`node:22-trixie-slim`), `uv` with Python 3.13 preinstalled (as steps 1
 and 21 require), `mdbtools` (`mdb-tables`, `mdb-json`), `postgresql-client`, `git`, the Docker CLI
-with compose and buildx plugins, `mlflow` (its `mlflow autolog claude stop-hook` CLI is the Claude
-Code tracing hook; `mlflow-skinny` lacks it, so this is the full package), and the harness CLIs
+with compose and buildx plugins, `mlflow`, the `@mlflow/claude-code` tracing plugin (pinned by
+`MLFLOW_CLAUDE_CODE_VERSION`; see MLflow tracking), and the harness CLIs
 pinned to the versions on the host (`claude` 2.1.312, `opencode` 2.0.23) plus the
 `@mlflow/opencode` plugin. OpenCode 2 is published on npm as `@opencode/cli` (the `opencode-ai`
 package stops at 1.x). The Dockerfile's `ARG *_VERSION` defaults are the only place the pins are
@@ -244,8 +249,9 @@ The next step to run = highest `Eval-Step` trailer on the branch + 1.
   `phase`, `source_commits`, and `body`.
 - The **Conventions** preamble (commit style, `Assisted-by` trailer, dev DB, Svelte MCP) is
   prepended to every step prompt, with `<harness>:<model>` filled in.
-- The "Reverted history" note and the "Not yet committed / step 43" section are excluded by
-  default (`--include-step-43` to opt in).
+- The "Reverted history" note and the "Not yet committed / step 43" section are excluded.
+  Evaluations run steps 1–42 only; `--include-step-43` exists for inspecting the parse, not for
+  evaluation runs.
 - Commit SHAs in the prompts refer to a repository the agent does not have. The framework adds
   a short preamble telling the agent those SHAs are informational only.
 - `openweight prompts list` / `openweight prompts show 12` to inspect the parsed result.
@@ -264,11 +270,16 @@ For each step:
 2. Build the prompt (conventions + step body + framework preamble).
 3. Start an MLflow run (nested under the branch's parent run) and invoke the harness with
    `docker exec` in the agent container (cwd `/workspace`):
-   - **Claude Code:** `claude -p "<prompt>" --model <model> --effort high
-     --output-format stream-json --settings /harness_config/claude.settings.json
+   - **Claude Code:** `claude --print "<prompt>" --model <model> --effort high
+     --output-format stream-json --verbose --session-id <uuid>
+     --settings /harness_config/claude.settings.json
      --mcp-config /harness_config/mcp.json --strict-mcp-config --plugin-dir /harness_config/plugins
-     --dangerously-skip-permissions`.
-     (`--strict-mcp-config` keeps any other MCP servers out of the run.)
+     --plugin-dir <@mlflow/claude-code> --dangerously-skip-permissions`.
+     (`--strict-mcp-config` keeps any other MCP servers out of the run; the runner picks the
+     session id so it can find the session's trace afterwards.) `claude.settings.json` turns off
+     Claude Code's own commit and PR attribution (`Co-Authored-By`, "Generated with"), so commit
+     messages carry only what PromptDB's conventions ask for, as with OpenCode, and the blind
+     reviewer is not handed the harness's name.
    - **OpenCode:** `opencode run --standalone --model <provider/model> --format json --auto
      "<prompt>"`, with `OPENCODE_CONFIG=/harness_config/opencode.json`.
    - Fresh session per step (the previous steps' context lives in the code and git history,
@@ -278,16 +289,34 @@ For each step:
    - Both Claude evaluations share one subscription's usage limits, so `--parallel` never runs
      more than one Claude evaluation at a time (OpenCode evaluations can run alongside). If a Claude
      step hits a usage limit, the runner resets the workspace to the previous step's tag, waits for
-     the limit to reset, and reruns the step, recording `rate_limited_retries`.
+     the limit to reset, and reruns the step, recording `rate_limited_retries`. The limit is
+     detected from Claude Code's `rate_limit_event` (status `rejected`, with its `resetsAt`) or an
+     HTTP 429 in the result; without a reset time the runner waits 15 minutes.
+   - `--steps` takes `next` (default), `N`, or `N-M`, and must start at the branch's next step.
+     `--reset` reruns earlier steps: it resets the branch to the tag before the first one and tags
+     the discarded steps' MLflow runs `openweight.superseded=true`.
 4. Capture the JSON event stream to `runs/<branch>/step-NN.jsonl` and log it as an MLflow artifact.
 5. If the agent left uncommitted changes, the runner commits them itself
    (`chore(eval): uncommitted changes from step N`) and records `agent_committed=false`.
    If the agent made no commits at all, an empty commit with the trailers is created so the step
    is still recorded.
 6. Run objective checks (below), log results, tag the step, move on.
-7. On harness failure/timeout: record `status=failed`, commit what exists, and continue or stop
-   according to `--on-failure {continue,stop}` (default `continue`, so later steps still get
-   a score even when one step went badly).
+7. **One retry on failure.** A step fails when the harness errors or times out, or when a check
+   fails that did not already fail after the previous step (so a check broken since step 5 does
+   not trigger a retry at every later step). The agent then gets exactly one retry: a fresh
+   session, consistent with fresh-session-per-step, started on the workspace as the first attempt
+   left it (its commits and uncommitted changes are kept, not reset). The retry prompt is the
+   step prompt plus what went wrong (the harness error or timeout, or the failing checks' output)
+   and asks the agent to finish the step and fix it. Checks run again afterwards. Both attempts'
+   event streams and traces are attached to the step run; tokens, cost, turns and duration sum
+   both attempts; `retried` (0/1) records whether it happened; `status` and the check metrics
+   reflect the final attempt. Usage-limit reruns are separate and do not consume the retry; a
+   usage limit hit during the retry restores the workspace to where the first attempt left it.
+   `--no-retry` turns the retry off. Implemented for harness errors and timeouts; retrying on
+   failed checks comes with milestone 6.
+8. If the step still fails after the retry: record `status=failed`, commit what exists, and
+   continue or stop according to `--on-failure {continue,stop}` (default `continue`, so later
+   steps still get a score even when one step went badly).
 
 ## Objective checks (`checks.py`)
 
@@ -322,16 +351,30 @@ conventional-commit format and `Assisted-by` trailer were followed.
   experiment does not exist on the server; it never creates experiments itself.
 - Every run is tagged `promptdb_sha` (hash of PromptDB.md) so results from different prompt
   revisions in the same experiment can be filtered apart.
-- **Parent run** per branch: tags `harness`, `model`, `branch`, `harness_version`, `promptdb_sha`.
-- **Child run** per step: params `step`, `title`, `phase`; metrics `duration_s`, `cost_usd`,
-  `input_tokens`, `output_tokens`, `num_turns`, `tool_calls`, check results, diff stats; artifacts:
-  prompt, event stream, check logs, `git diff step-(N-1)..step-N`.
+- **Parent run** per branch and PromptDB revision (reused across invocations, named after the
+  branch): tags `openweight.role=branch`, `harness`, `model`, `effort`, `branch`,
+  `harness_version`, `promptdb_sha`.
+- **Child run** per step (`step-NN`, tag `openweight.role=step`): params `step`, `title`, `phase`;
+  metrics `duration_s`, `cost_usd`, `input_tokens`, `output_tokens`, `cache_read_tokens`,
+  `cache_write_tokens`, `num_turns`, `tool_calls`, `agent_commits`, `agent_committed`,
+  `rate_limited_retries`, `retried`, `traces`, check results, diff stats (`files_changed`, `lines_added`,
+  `lines_removed`); tags `status`, `session_id`, `commit`, `error`; artifacts: `prompt.md`, the
+  event stream, harness stderr, check logs, `diff.patch` (`step-(N-1)..step-N`). `input_tokens`
+  excludes cached input, which is counted in the two cache metrics, as both providers report it.
 - **Traces** (MLflow GenAI):
-  - Claude Code: MLflow's Claude Code hook integration (`mlflow autolog claude` configures
-    Stop hooks); we put the equivalent hook config in `harness_config/claude.settings.json`.
+  - Claude Code: the `@mlflow/claude-code` plugin, which in MLflow 3.17 replaced the Python
+    `mlflow autolog claude stop-hook`. `mlflow autolog claude` would install it from a GitHub
+    marketplace at run time; instead the sandbox image pins the npm package and the runner loads it
+    with `--plugin-dir`. Its Stop hook writes one trace per session; `claude.settings.json` sets
+    `MLFLOW_CLAUDE_TRACING_ENABLED`, and the `MLFLOW_*` variables come from the environment.
   - OpenCode: the `@mlflow/opencode` plugin listed in `harness_config/opencode.json`.
-  - The step's MLflow run id is passed via env so traces are linked to the step run
-    (to verify during implementation; fallback is tagging traces by session id after the fact).
+  - Neither plugin can attach a trace to a given run, so after each step the runner finds the
+    session's traces by their `mlflow.trace.session` metadata, links them to the step run
+    (`link_traces_to_run`), and tags them `branch` and `step`. A session killed by the timeout
+    never reaches the Stop hook and has no trace.
+  - Traces are for inspection, not metrics: on the first step-1 run (2026-10-30) the
+    `@mlflow/claude-code` 0.4.0 trace had every tool call (32 TOOL spans) but only 12 of the
+    session's LLM calls, and about a third of the output tokens Claude Code reported.
 - Token/cost metrics come from the harness's own JSON output, so they are comparable even if
   tracing coverage differs between harnesses. `cost_usd` is **notional** for both harnesses: Claude
   runs on a subscription (the figure is Claude Code's API-equivalent estimate, not billed spend) and
@@ -382,7 +425,8 @@ uv run openweight review --all            # every eval/* branch, for a leaderboa
    server.
 5. **OpenCode harness** — same for OpenCode; normalize its JSON events into the same
    `StepResult` (tokens, cost, turns).
-6. **Checks** — objective checks with per-step gating, run in the sandbox.
+6. **Checks** — objective checks with per-step gating, run in the sandbox; extend the one-retry
+   failure policy (already in place for harness errors and timeouts) to failed checks.
 7. **Full run** — one complete 42-step run per harness with a baseline model; fix runner
    robustness issues (timeouts, failed steps, resume).
 8. **Review** — judge, rubric, MLflow assessments, `report` command.
@@ -392,20 +436,15 @@ uv run openweight review --all            # every eval/* branch, for a leaderboa
 
 To resolve before milestone 4.
 
-1. **Repeat runs.** Agent runs are non-deterministic. Is one run per pair enough, or do we want
-   N repeats? If repeats, the branch name needs a suffix (`eval/claude/<model>/r2`).
-2. **Session strategy.** Plan assumes a fresh session per step. Alternative: one continuous
-   session per branch (tests long-context handling but cannot be compared fairly across
-   harnesses). OK with fresh-per-step?
-3. **Failure policy.** If step N fails or breaks the build, keep going (current default), stop, or
-   let the agent retry once with the check output?
+1. **Repeat runs.** *Resolved:* one run per pair, no repeats; branch names have no run suffix.
+2. **Session strategy.** *Resolved:* a fresh session per step (retries included).
+3. **Failure policy.** *Resolved:* the agent retries once with the error or failing check output,
+   then the runner continues (see Runner, step 7).
 4. **MLflow server.** *Resolved:* the tracking server runs MLflow 3.17, which supports GenAI traces
    and assessments (≥ 3.4 needed); the client is pinned to `mlflow>=3.17.2` to match.
 5. **Judge model and cadence.** Which frontier model is the reviewer (and should we use two judges
    from different vendors to reduce self-preference bias, since Claude would be judging Claude)?
    Review every step, only phase boundaries, or only the final state?
-6. **Budget.** Per-step and per-run cost/time caps? 42 steps × several pairs × possible repeats
-    adds up quickly.
-7. **Remote.** Should `eval/*` branches be pushed to a GitHub remote (for sharing/inspection),
-    or stay local? There is currently no remote.
-8. **Step 43.** Include the "not yet committed" follow-up as a final step, or leave it out?
+6. **Budget.** Per-step and per-run cost/time caps? 42 steps × several pairs adds up quickly.
+7. **Remote.** *Resolved:* branches stay local and are never pushed.
+8. **Step 43.** *Resolved:* excluded; evaluations run steps 1–42.

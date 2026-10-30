@@ -39,14 +39,20 @@ uv run openweight sandbox up eval/claude/claude-sonnet-5-5-high
 uv run openweight sandbox shell eval/claude/claude-sonnet-5-5-high
 uv run openweight sandbox down eval/claude/claude-sonnet-5-5-high
 uv run openweight sandbox list              # sandboxes on this Docker host
+uv run openweight run --harness claude --model claude-sonnet-5-5 --effort high --steps 1
+uv run openweight run --harness claude --model claude-sonnet-5-5 --effort high --until 10
+uv run openweight run --harness claude --model claude-sonnet-5-5 --effort high --steps 1 --reset
 uv run pytest                               # framework tests
 uv run pytest --docker                      # also start real sandbox containers
 ```
 
 ## Status
 
-Milestones 1 (skeleton and PromptDB parsing), 2 (eval branches and workspaces), and 3 (sandbox)
-are done. `workspace open` creates the orphan eval branch in `workspaces/<harness>--<model-slug>/`
-with the benchmark inputs in place, and `sandbox up` starts that evaluation's agent container and
-private Docker daemon around it. The runner, harness drivers, and reviewer are not implemented yet;
-see the milestones in [PLAN.md](PLAN.md).
+Milestones 1 (skeleton and PromptDB parsing), 2 (eval branches and workspaces), 3 (sandbox), and
+4 (Claude harness) are done. `workspace open` creates the orphan eval branch in
+`workspaces/<harness>--<model-slug>/` with the benchmark inputs in place, and `sandbox up` starts
+that evaluation's agent container and private Docker daemon around it. `run` drives Claude Code
+through the steps in that sandbox: each step becomes a tagged commit on the branch and a child run
+of the branch's MLflow run, with the session's trace linked to it and the event stream kept in
+`runs/<branch>/`. The OpenCode driver, objective checks, and reviewer are not implemented yet; see
+the milestones in [PLAN.md](PLAN.md).

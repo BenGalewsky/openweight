@@ -8,6 +8,7 @@ from typer.testing import CliRunner
 from openweight import sandbox
 from openweight.branches import git
 from openweight.cli import app
+from openweight.harnesses.claude import MLFLOW_PLUGIN_DIR
 from openweight.sandbox import Sandbox
 
 COMPOSE = """\
@@ -146,6 +147,9 @@ def test_agent_environment(live: tuple[Path, str, Sandbox]) -> None:
     assert agent_sh(box, "uv run --no-project python --version").startswith("Python 3.13")
     agent_sh(box, "node --version && mdb-tables --version && psql --version && git --version")
     agent_sh(box, "docker compose version && docker buildx version")
+    # The Claude Code tracing plugin, loaded with --plugin-dir.
+    agent_sh(box, f"test -f {MLFLOW_PLUGIN_DIR}/.claude-plugin/plugin.json")
+    agent_sh(box, f"grep -q stop.cjs {MLFLOW_PLUGIN_DIR}/hooks/hooks.json")
 
     # The workspace is writable and owned by the agent; harness_config is read-only.
     agent_sh(box, "touch /workspace/from-agent && git status --short")
@@ -164,6 +168,19 @@ def test_env_and_timeout(live: tuple[Path, str, Sandbox]) -> None:
     assert agent_sh(box, 'echo "${OW_SECRET:-unset}"') == "unset"
     assert box.exec(["sleep", "30"], timeout=1).returncode == sandbox.TIMEOUT_EXIT
     assert box.exec(["pgrep", "--full", "sleep 30"]).returncode == 1  # nothing left running
+
+
+@pytest.mark.docker
+def test_exec_streams_stdout_to_file(live: tuple[Path, str, Sandbox], tmp_path: Path) -> None:
+    _, _, box = live
+    box.up()
+    out = tmp_path / "events.jsonl"
+    with out.open("w") as f:
+        result = box.exec(["sh", "-c", "echo one; echo two >&2"], stdout=f)
+    assert result.returncode == 0
+    assert result.stdout is None
+    assert result.stderr == "two\n"
+    assert out.read_text() == "one\n"
 
 
 @pytest.mark.docker

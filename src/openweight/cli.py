@@ -5,7 +5,7 @@ from typing import Annotated
 
 import typer
 
-from openweight import branches, promptdb, sandbox
+from openweight import branches, harnesses, promptdb, runner, sandbox, tracking
 
 app = typer.Typer(no_args_is_help=True, help="Evaluate coding harnesses and models on PromptDB.")
 prompts_app = typer.Typer(no_args_is_help=True, help="Inspect the parsed benchmark prompts.")
@@ -110,6 +110,65 @@ def _sandbox(branch: str) -> sandbox.Sandbox:
 def _fail(e: Exception) -> typer.Exit:
     typer.echo(f"error: {e}", err=True)
     return typer.Exit(1)
+
+
+@app.command("run")
+def run(
+    harness: Annotated[str, typer.Option(help="Harness: claude or opencode.")],
+    model: Annotated[str, typer.Option(help="Model id, e.g. claude-sonnet-5-5 or lumen/glm-5.3.")],
+    effort: Annotated[str | None, typer.Option(help="Effort level (part of the branch name).")] = (
+        None
+    ),
+    steps: Annotated[
+        str, typer.Option(help="'next', a step N, or a range N-M (from the branch's next step).")
+    ] = "next",
+    until: Annotated[
+        int | None, typer.Option(help="Run from the first selected step through this one.")
+    ] = None,
+    timeout: Annotated[float, typer.Option(help="Wall-clock limit per step, in minutes.")] = 60,
+    on_failure: Annotated[
+        str, typer.Option(help="After a failed step: continue or stop.")
+    ] = "continue",
+    retry: Annotated[
+        bool, typer.Option(help="Give a failed or timed-out step one retry in a fresh session.")
+    ] = True,
+    reset: Annotated[
+        bool, typer.Option("--reset", help="Discard steps that already ran and rerun them.")
+    ] = False,
+    path: PromptDBPath = Path("PromptDB.md"),
+    include_step_43: IncludeStep43 = False,
+) -> None:
+    """Run benchmark steps for one (harness, model, effort) pair, one session per step."""
+    try:
+        evaluation = branches.Evaluation(harness, model, effort)
+        driver = harnesses.get(harness)
+        options = runner.Options(timeout_s=timeout * 60, on_failure=on_failure, retry_failed=retry)
+    except ValueError as e:
+        raise typer.BadParameter(str(e)) from None
+    except NotImplementedError as e:
+        raise _fail(e) from None
+    repo = branches.repo_root(Path.cwd())
+    db = promptdb.load(path, include_step_43)
+    tracking.load_env(repo)
+    try:
+        tracker = tracking.Tracker.from_env()
+        box = sandbox.Sandbox.for_branch(repo, evaluation.branch)
+        job = runner.Runner(repo, evaluation, db, driver, box, tracker, options, log=typer.echo)
+        selected = runner.select_steps(steps, until, job.workspace.next_step(), len(db.steps))
+        outcomes = job.run(selected, reset=reset)
+    except ValueError as e:
+        raise typer.BadParameter(str(e), param_hint="--steps/--until") from None
+    except (
+        tracking.TrackingError,
+        runner.RunnerError,
+        branches.WorkspaceError,
+        branches.GitError,
+        sandbox.DockerError,
+        sandbox.SandboxError,
+    ) as e:
+        raise _fail(e) from None
+    if any(outcome.result.status != harnesses.base.OK for outcome in outcomes):
+        raise typer.Exit(1)
 
 
 @sandbox_app.command("build")

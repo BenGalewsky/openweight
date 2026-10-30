@@ -8,6 +8,7 @@ ARG CLAUDE_VERSION=2.1.312
 ARG OPENCODE_VERSION=2.0.23
 ARG MLFLOW_VERSION=3.17.2
 ARG MLFLOW_OPENCODE_VERSION=0.4.0
+ARG MLFLOW_CLAUDE_CODE_VERSION=0.4.0
 ARG PYTHON_VERSION=3.13
 
 FROM docker:${DOCKER_VERSION}-cli AS docker-cli
@@ -19,6 +20,7 @@ ARG CLAUDE_VERSION
 ARG OPENCODE_VERSION
 ARG MLFLOW_VERSION
 ARG MLFLOW_OPENCODE_VERSION
+ARG MLFLOW_CLAUDE_CODE_VERSION
 ARG PYTHON_VERSION
 ARG AGENT_UID=1000
 
@@ -37,16 +39,21 @@ ENV UV_PYTHON_INSTALL_DIR=/opt/uv/python \
     UV_PYTHON_PREFERENCE=only-managed
 RUN uv python install "${PYTHON_VERSION}"
 
-# mlflow CLI for the Claude Code tracing hook (`mlflow autolog claude stop-hook`).
+# mlflow CLI. Claude Code tracing no longer uses it (the @mlflow/claude-code plugin below replaced
+# the Python Stop hook); kept until milestone 5 settles what OpenCode tracing needs.
 RUN uv venv --quiet --python "${PYTHON_VERSION}" /opt/mlflow \
     && uv pip install --quiet --no-cache --python /opt/mlflow/bin/python "mlflow==${MLFLOW_VERSION}" \
     && ln -s /opt/mlflow/bin/mlflow /usr/local/bin/mlflow
 
 # OpenCode 2 is published as @opencode/cli (the opencode-ai package stops at 1.x).
+# @mlflow/claude-code is the Claude Code tracing plugin (its Stop hook writes the trace); it is
+# loaded with --plugin-dir from the global node_modules, so nothing is fetched from GitHub at run
+# time, unlike `mlflow autolog claude`, which installs it from a marketplace.
 RUN npm install --global --no-fund --no-audit \
       "@anthropic-ai/claude-code@${CLAUDE_VERSION}" \
       "@opencode/cli@${OPENCODE_VERSION}" \
       "@mlflow/opencode@${MLFLOW_OPENCODE_VERSION}" \
+      "@mlflow/claude-code@${MLFLOW_CLAUDE_CODE_VERSION}" \
     && npm cache clean --force
 
 # The base image's `node` user would take the agent's uid.
