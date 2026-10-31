@@ -82,6 +82,10 @@ workspaces/                     # gitignored: one standalone git repo per eval b
   Ornith is declared with `"tool_call": true`: Lumen returns proper tool calls for it (checked
   2026-10-29), and without the flag OpenCode would not offer it any tools at all. (OpenCode 2
   ignores the 1.x `"reasoning": true` flag, so it is not set; reasoning output is parsed anyway.)
+- GLM and Ornith are declared text-only (`"modalities": {"input": ["text"]}`), as Lumen's model
+  list says they are. Without it OpenCode sends an image the agent reads to the model, and Lumen
+  rejects the whole request: GLM's first step-2 session (2026-10-31) died reading screenshots it
+  had downloaded. Qwen3.8-flash accepts images on Lumen and is left undeclared.
 - Ornith runs on 1.0 for the duration of the project.
 - At startup the runner checks each OpenCode model id against the provider's model list
   (`<baseURL>/models`, with the provider's settings from `opencode.json`) and refuses to start an

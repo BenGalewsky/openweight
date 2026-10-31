@@ -12,7 +12,8 @@
         "glm-5.3": {
           "name": "glm-5.3 via Lumen",
           "limit": { "context": 524282, "output": 131072 },
-          "cost": { "input": 1.321413, "output": 4.248318 }
+          "cost": { "input": 1.321413, "output": 4.248318 },
+          "modalities": { "input": ["text"], "output": ["text"] }
         },
         "qwen3.8-flash": {
           "name": "qwen3.8-flash via Lumen",
