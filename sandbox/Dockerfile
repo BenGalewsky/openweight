@@ -20,9 +20,12 @@ ARG MLFLOW_CLAUDE_CODE_VERSION
 ARG PYTHON_VERSION
 ARG AGENT_UID=1000
 
+# g++, make, and python3 are node-gyp's toolchain: npm builds some native modules from source
+# when installing from a lock file (better-sqlite3 13 does, despite its prebuilt binaries).
 RUN apt-get update \
     && apt-get install --yes --no-install-recommends \
-      ca-certificates curl git jq less mdbtools postgresql-client procps tini unzip \
+      ca-certificates curl g++ git jq less make mdbtools postgresql-client procps python3 tini \
+      unzip \
     && rm -rf /var/lib/apt/lists/*
 
 # Docker CLI with the compose and buildx plugins; the daemon is the evaluation's dind container.

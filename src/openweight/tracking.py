@@ -145,6 +145,16 @@ class Tracker:
     def log_artifact(self, run_id: str, path: Path) -> None:
         self.client.log_artifact(run_id, str(path))
 
+    def log_artifacts(self, run_id: str, directory: Path, artifact_path: str) -> None:
+        self.client.log_artifacts(run_id, str(directory), artifact_path)
+
+    def metrics(self, run_id: str) -> dict[str, float]:
+        """A run's latest metrics, or none if the run is not on the server."""
+        try:
+            return dict(self.client.get_run(run_id).data.metrics)
+        except MlflowException:
+            return {}
+
     def end(self, run_id: str, status: str = "FINISHED") -> None:
         self.client.set_terminated(run_id, status)
 

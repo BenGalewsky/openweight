@@ -5,7 +5,7 @@ from typing import Annotated
 
 import typer
 
-from openweight import branches, harnesses, promptdb, runner, sandbox, serve, tracking
+from openweight import branches, checks, harnesses, promptdb, runner, sandbox, serve, tracking
 
 app = typer.Typer(no_args_is_help=True, help="Evaluate coding harnesses and models on PromptDB.")
 prompts_app = typer.Typer(no_args_is_help=True, help="Inspect the parsed benchmark prompts.")
@@ -29,6 +29,17 @@ Ports = Annotated[
 IncludeStep43 = Annotated[
     bool,
     typer.Option("--include-step-43", help="Include the 'Not yet committed' follow-up step."),
+]
+HarnessOption = Annotated[str, typer.Option("--harness", help="Harness: claude or opencode.")]
+ModelOption = Annotated[
+    str, typer.Option("--model", help="Model id, e.g. claude-sonnet-5-5 or lumen/glm-5.3.")
+]
+EffortOption = Annotated[
+    str | None, typer.Option("--effort", help="Effort level (part of the branch name).")
+]
+DockerBuild = Annotated[
+    bool,
+    typer.Option("--docker-build", help="Also run the (slow) docker build check from step 14."),
 ]
 
 
@@ -148,8 +159,16 @@ def run(
         str, typer.Option(help="After a failed step: continue or stop.")
     ] = "continue",
     retry: Annotated[
-        bool, typer.Option(help="Give a failed or timed-out step one retry in a fresh session.")
+        bool,
+        typer.Option(
+            help="Give a failed or timed-out step, or one that breaks a check, one retry in a "
+            "fresh session."
+        ),
     ] = True,
+    run_checks: Annotated[
+        bool, typer.Option("--checks/--no-checks", help="Run the objective checks after each step.")
+    ] = True,
+    docker_build: DockerBuild = False,
     reset: Annotated[
         bool, typer.Option("--reset", help="Discard steps that already ran and rerun them.")
     ] = False,
@@ -169,7 +188,11 @@ def run(
     try:
         tracker = tracking.Tracker.from_env()
         box = sandbox.Sandbox.for_branch(repo, evaluation.branch)
-        job = runner.Runner(repo, evaluation, db, driver, box, tracker, options, log=typer.echo)
+        check_list = checks.default_checks(docker_build) if run_checks else []
+        job = runner.Runner(
+            repo, evaluation, db, driver, box, tracker, options, log=typer.echo,
+            check_list=check_list,
+        )  # fmt: skip
         selected = runner.select_steps(steps, until, job.workspace.next_step(), len(db.steps))
         outcomes = job.run(selected, reset=reset)
     except ValueError as e:
@@ -177,13 +200,61 @@ def run(
     except (
         tracking.TrackingError,
         runner.RunnerError,
+        checks.CheckError,
         branches.WorkspaceError,
         branches.GitError,
         sandbox.DockerError,
         sandbox.SandboxError,
     ) as e:
         raise _fail(e) from None
-    if any(outcome.result.status != harnesses.base.OK for outcome in outcomes):
+    if any(outcome.status != harnesses.base.OK for outcome in outcomes):
+        raise typer.Exit(1)
+
+
+@app.command("check")
+def check(
+    harness: HarnessOption,
+    model: ModelOption,
+    effort: EffortOption = None,
+    step: Annotated[
+        int | None,
+        typer.Option(help="Run the checks that apply to this step (default: the latest step)."),
+    ] = None,
+    docker_build: DockerBuild = False,
+) -> None:
+    """Run the objective checks on an evaluation's workspace as it is, without logging to MLflow.
+
+    They run on a copy of the workspace; logs go to runs/<branch>/check.checks/.
+    """
+    try:
+        evaluation = branches.Evaluation(harness, model, effort)
+    except ValueError as e:
+        raise typer.BadParameter(str(e)) from None
+    repo = branches.repo_root(Path.cwd())
+    try:
+        workspace = branches.Workspace(branches.workspace_path(repo, evaluation), evaluation)
+        step = step if step is not None else workspace.next_step() - 1
+        if step < 1:
+            raise typer.BadParameter(f"no step has run on {evaluation.branch}", param_hint="--step")
+        box = sandbox.Sandbox.for_branch(repo, evaluation.branch)
+        for action in box.up():
+            typer.echo(action)
+        log_dir = repo / "runs" / evaluation.branch / "check.checks"
+        results = checks.run_checks(
+            box, workspace.path, step, checks.default_checks(docker_build), log_dir, typer.echo
+        )
+    except (
+        checks.CheckError,
+        branches.WorkspaceError,
+        branches.GitError,
+        sandbox.DockerError,
+        sandbox.SandboxError,
+    ) as e:
+        raise _fail(e) from None
+    for result in results:
+        typer.echo(f"  {result.status:<8} {result.check.title}")
+    typer.echo(f"logs in {log_dir.relative_to(repo)}")
+    if any(result.status == checks.FAILED for result in results):
         raise typer.Exit(1)
 
 

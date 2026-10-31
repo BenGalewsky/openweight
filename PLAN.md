@@ -167,8 +167,10 @@ OrbStack (linux/arm64).
 
 **Image (`openweight-sandbox`)** built from `sandbox/Dockerfile` by `openweight sandbox build`:
 Debian 13 with Node 22 (`node:22-trixie-slim`), `uv` with Python 3.13 preinstalled (as steps 1
-and 21 require), `mdbtools` (`mdb-tables`, `mdb-json`), `postgresql-client`, `git`, the Docker CLI
-with compose and buildx plugins, the `@mlflow/claude-code` tracing plugin (pinned by
+and 21 require), `mdbtools` (`mdb-tables`, `mdb-json`), `postgresql-client`, `git`, node-gyp's
+toolchain (`g++`, `make`, `python3`: `npm ci` builds `better-sqlite3` 13 from source even though
+the package ships prebuilt binaries, so without it no step-1 app installs from its lock file), the
+Docker CLI with compose and buildx plugins, the `@mlflow/claude-code` tracing plugin (pinned by
 `MLFLOW_CLAUDE_CODE_VERSION`; see MLflow tracking), and the harness CLIs
 pinned to the versions on the host (`claude` 2.1.312, `opencode` 2.0.23). OpenCode 2 is published
 on npm as `@opencode/cli` (the `opencode-ai` package stops at 1.x). The Dockerfile's `ARG *_VERSION` defaults are the only place the pins are
@@ -328,21 +330,26 @@ For each step:
    (`chore(eval): uncommitted changes from step N`) and records `agent_committed=false`.
    If the agent made no commits at all, an empty commit with the trailers is created so the step
    is still recorded.
-6. Run objective checks (below), log results, tag the step, move on.
+6. Run the objective checks (below) on the work as the agent left it, then record and tag the
+   step, log results, and move on.
 7. **One retry on failure.** A step fails when the harness errors or times out, or when a check
    fails that did not already fail after the previous step (so a check broken since step 5 does
-   not trigger a retry at every later step). The agent then gets exactly one retry: a fresh
+   not trigger a retry at every later step). Which checks failed after the previous step is read
+   from the previous step's MLflow run (its `Eval-Run-Id`); a check skipped there, or a step
+   without a run, counts as not failing. The agent then gets exactly one retry: a fresh
    session, consistent with fresh-session-per-step, started on the workspace as the first attempt
    left it (its commits and uncommitted changes are kept, not reset). The retry prompt is the
-   step prompt plus what went wrong (the harness error or timeout, or the failing checks' output)
-   and asks the agent to finish the step and fix it. Checks run again afterwards. Both attempts'
-   event streams and traces are attached to the step run; tokens, cost, turns and duration sum
-   both attempts; `retried` (0/1) records whether it happened; `status` and the check metrics
-   reflect the final attempt. Usage-limit reruns are separate and do not consume the retry; a
-   usage limit hit during the retry restores the workspace to where the first attempt left it.
-   `--no-retry` turns the retry off. Implemented for harness errors and timeouts; retrying on
-   failed checks comes with milestone 6.
-8. If the step still fails after the retry: record `status=failed`, commit what exists, and
+   step prompt plus what went wrong (the harness error or timeout, or each newly failing check's
+   command and the last 60 lines of its output) and asks the agent to finish the step and fix it.
+   Checks run on the first attempt only if its session succeeded (a failed session is retried
+   anyway), and again after the retry. Both attempts' event streams, check logs and traces are
+   attached to the step run; tokens, cost, turns and duration sum both attempts; `retried` (0/1)
+   records whether it happened; `status` and the check metrics reflect the final attempt.
+   Usage-limit reruns are separate and do not consume the retry; a usage limit hit during the
+   retry restores the workspace to where the first attempt left it. `--no-retry` turns the retry
+   off.
+8. If the step still fails after the retry: record `status=failed` (a session that succeeded but
+   left newly failing checks is `failed` too, with `harness_status=ok`), commit what exists, and
    continue or stop according to `--on-failure {continue,stop}` (default `continue`, so later
    steps still get a score even when one step went badly).
 
@@ -359,14 +366,42 @@ skipped (not failed) until the step that introduces the relevant tooling.
 | web lint | `npm run lint` | 1 |
 | web build | `npm run build` | 1 |
 | db push + seed | `npm run db:push && npm run db:seed` against a throwaway Postgres | 15 |
-| compose config | `docker compose config` | 16 |
+| compose config | `docker compose config --quiet` | 16 |
 | dagster install | `uv sync` (in `isgs_dagster/`) | 21 |
 | dagster defs load | `uv run dg check defs` | 21 |
 | dagster tests | `uv run pytest` | 23 |
-| docker build | `docker build --target runtime .` (opt-in, slow) | 14 |
+| docker build | `docker build .`; `docker build --target runtime .` from 16 (opt-in, slow) | 14 |
 
-Also logged: files changed, lines added/removed, number of commits by the agent, whether the
-conventional-commit format and `Assisted-by` trailer were followed.
+- **On a copy.** Checks never run in `/workspace`: a failed `npm ci` there would leave the next
+  session without `node_modules` (the first trial run did exactly that). The runner copies the
+  working tree as the agent left it to `/tmp/openweight-checks` in the agent container, with its
+  uncommitted changes and ignored files (`.env`, `data/`) but without `.git`, the Access databases,
+  `node_modules` and `.venv`, runs the checks there, and removes the copy. The install checks
+  therefore install from the lock files as a fresh clone would. Checks run before the step is
+  recorded, so a retry starts from the agent's state, not the runner's commit.
+- **Environment.** Only `CI=true` is set. Nothing from PromptDB's conventions is injected: the
+  conventions' Postgres `DATABASE_URL` would be a file path to the SQLite-era app of steps 1–14.
+  Whatever else the app needs has to come from the agent's own (copied) `.env` files.
+- **Throwaway Postgres.** The seed check starts `postgres:16-alpine` (as `ow-check-postgres`, in
+  the evaluation's dind) on port 55432, so it never touches the agent's compose database on 5432,
+  waits for `pg_isready`, runs push and seed with `DATABASE_URL` pointing at it, and removes it.
+  Seeding reads the NDJSON extracts the agent's step-1 exporter wrote into `data/`.
+- **Prerequisites.** A check whose prerequisite failed (the typecheck, lint, build and seed checks
+  need web install; dagster defs and tests need dagster install) fails without running, and so
+  does a check whose directory does not exist once its step has come.
+- **Timeouts.** 10 minutes per check (20 for the seed and dagster tests, 30 for docker build).
+- **Docker build** has no named stages before step 16, so it builds the default stage until then.
+  It is opt-in: `openweight run --docker-build`.
+- `openweight run --no-checks` turns checks off; `openweight check --harness ... --model ...
+  [--step N]` runs them on a workspace as it is, without MLflow, logging to
+  `runs/<branch>/check.checks/`.
+
+Logged per step: `check.<name>` (1 passed, 0 failed; absent when skipped), `checks_passed`,
+`checks_failed`, `checks_duration_s`, and the logs as `step-NN.checks/<name>.log` with a
+`checks.json` summary (`step-NN.retry.checks/` for the retry's). Also logged: files changed, lines
+added/removed, number of commits by the agent, and the share of the agent's commits (those the
+runner did not author) with a conventional-commit subject (`commits_conventional`) and with the
+`Assisted-by: <harness>:<model>` trailer PromptDB asks for (`commits_assisted_by`).
 
 ## MLflow tracking (`tracking.py`)
 
@@ -385,9 +420,10 @@ conventional-commit format and `Assisted-by` trailer were followed.
 - **Child run** per step (`step-NN`, tag `openweight.role=step`): params `step`, `title`, `phase`;
   metrics `duration_s`, `cost_usd`, `input_tokens`, `output_tokens`, `cache_read_tokens`,
   `cache_write_tokens`, `num_turns`, `tool_calls`, `agent_commits`, `agent_committed`,
-  `rate_limited_retries`, `retried`, `traces`, check results, diff stats (`files_changed`, `lines_added`,
-  `lines_removed`); tags `status`, `session_id`, `commit`, `error`; artifacts: `prompt.md`, the
-  event stream, harness stderr, check logs, `diff.patch` (`step-(N-1)..step-N`). `input_tokens`
+  `rate_limited_retries`, `retried`, `traces`, check results, commit conventions, diff stats
+  (`files_changed`, `lines_added`, `lines_removed`); tags `status`, `harness_status`,
+  `session_id`, `commit`, `error`; artifacts: `prompt.md`, the event stream, harness stderr, check
+  logs, `diff.patch` (`step-(N-1)..step-N`). `input_tokens`
   excludes cached input, which is counted in the two cache metrics, as both providers report it.
 - **Traces** (MLflow GenAI):
   - Claude Code: the `@mlflow/claude-code` plugin, which in MLflow 3.17 replaced the Python

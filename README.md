@@ -43,6 +43,8 @@ uv run openweight run --harness claude --model claude-sonnet-5-5 --effort high -
 uv run openweight run --harness claude --model claude-sonnet-5-5 --effort high --until 10
 uv run openweight run --harness claude --model claude-sonnet-5-5 --effort high --steps 1 --reset
 uv run openweight run --harness opencode --model lumen/glm-5.3 --steps 1
+uv run openweight run --harness opencode --model lumen/glm-5.3 --docker-build   # also docker build
+uv run openweight check --harness opencode --model lumen/glm-5.3               # just the checks
 uv run openweight serve eval/claude/claude-sonnet-5-5-high               # try the app on localhost
 uv run openweight serve eval/opencode/lumen--glm-5.3 --port 5174:5173     # alongside another one
 uv run openweight serve eval/claude/claude-sonnet-5-5-high -p 4173 -- \
@@ -68,11 +70,14 @@ since the forwarder reaches the sandbox over its network rather than its loopbac
 ## Status
 
 Milestones 1 (skeleton and PromptDB parsing), 2 (eval branches and workspaces), 3 (sandbox), 4
-(Claude harness), and 5 (OpenCode harness) are done. `workspace open` creates the orphan eval branch
+(Claude harness), 5 (OpenCode harness), and 6 (objective checks) are done. `workspace open` creates the orphan eval branch
 in `workspaces/<harness>--<model-slug>/` with the benchmark inputs in place, and `sandbox up` starts
 that evaluation's agent container and private Docker daemon around it. `run` drives Claude Code or
 OpenCode through the steps in that sandbox: each step becomes a tagged commit on the branch and a
 child run of the branch's MLflow run, with the session's trace linked to it and the event stream
 kept in `runs/<branch>/`. OpenCode traces are written by the runner from OpenCode's session
-exports, as the `@mlflow/opencode` plugin does not load in OpenCode 2. Objective checks and the
-reviewer are not implemented yet; see the milestones in [PLAN.md](PLAN.md).
+exports, as the `@mlflow/opencode` plugin does not load in OpenCode 2. After each session the
+objective checks (install, typecheck, lint, build, seed, compose, Dagster) run on a copy of the
+workspace in the sandbox; a session that fails, or whose work fails a check that passed after the
+previous step, gets one retry with the failure output. The reviewer is not implemented yet; see
+the milestones in [PLAN.md](PLAN.md).

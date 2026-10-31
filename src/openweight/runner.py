@@ -4,8 +4,9 @@ For each step the runner checks the workspace is clean at the previous step's ta
 sandbox, runs the harness under a timeout with its event stream captured to
 ``runs/<branch>/step-NN.jsonl``, records the step commit and tag, syncs the branch to the main
 repository, and logs everything to a child run of the branch's MLflow run, with the harness's
-traces linked to it. A session that fails or times out gets one retry: a fresh session that
-starts from the work the first one left, told what went wrong.
+traces linked to it. The objective checks run in the sandbox on the work the session left. A
+session that fails or times out, or whose work fails a check that passed after the previous step,
+gets one retry: a fresh session that starts from the work the first one left, told what went wrong.
 """
 
 import os
@@ -15,8 +16,9 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from openweight import branches, sandbox, tracking
+from openweight import branches, checks, sandbox, tracking
 from openweight.branches import Evaluation, StepRecord, Workspace
+from openweight.checks import Check, CheckResult
 from openweight.harnesses.base import (
     FAILED,
     OK,
@@ -52,7 +54,7 @@ class Options:
     rate_limit_wait_s: float = 15 * 60
     max_rate_limit_retries: int = 20
     trace_wait_s: float = 60
-    # Give a failed or timed-out step one more session.
+    # Give a failed or timed-out step, or one that broke a check, one more session.
     retry_failed: bool = True
 
     def __post_init__(self) -> None:
@@ -64,12 +66,16 @@ class Options:
 class StepOutcome:
     step: int
     run_id: str
+    # The step's status: the final session's, or failed if its work fails a check that passed
+    # after the previous step.
+    status: str
     result: StepResult
     record: StepRecord
     duration_s: float
     rate_limited_retries: int = 0
     trace_ids: list[str] = field(default_factory=list)
     retried: bool = False
+    checks: list[CheckResult] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -87,9 +93,9 @@ def retry_prompt(prompt: str, reason: str) -> str:
     """``prompt`` with a note asking a fresh session to finish a step an earlier one failed."""
     note = (
         "## Retry\n\n"
-        "An earlier session working on this step did not finish. Its work is in the repository as "
-        "it left it: any commits it made, and any uncommitted changes in the working tree. Review "
-        "that work, then complete the step and fix what went wrong.\n\n"
+        "An earlier session working on this step did not complete it. Its work is in the "
+        "repository as it left it: any commits it made, and any uncommitted changes in the working "
+        "tree. Review that work, then complete the step and fix what went wrong.\n\n"
         f"{reason}"
     )
     return f"{prompt.rstrip()}\n\n{note}\n"
@@ -126,6 +132,7 @@ class Runner:
         options: Options | None = None,
         log: Callable[[str], None] = print,
         sleep: Callable[[float], None] = time.sleep,
+        check_list: Sequence[Check] | None = None,
     ) -> None:
         self.repo = repo
         self.evaluation = evaluation
@@ -136,6 +143,7 @@ class Runner:
         self.options = options or Options()
         self.log = log
         self.sleep = sleep
+        self.checks = checks.default_checks() if check_list is None else list(check_list)
         self.runs_dir = repo / "runs" / evaluation.branch
         self._workspace: Workspace | None = None
 
@@ -185,8 +193,8 @@ class Runner:
             for number in steps:
                 outcome = self.run_step(self.db.step(number), parent, env)
                 outcomes.append(outcome)
-                if outcome.result.status != OK and self.options.on_failure == "stop":
-                    self.log(f"stopping after step {number} ({outcome.result.status})")
+                if outcome.status != OK and self.options.on_failure == "stop":
+                    self.log(f"stopping after step {number} ({outcome.status})")
                     break
         except BaseException:
             self.tracker.end(parent, "KILLED")
@@ -225,13 +233,23 @@ class Runner:
         self.tracker.log_text(run_id, prompt, "prompt.md")
         self.runs_dir.mkdir(parents=True, exist_ok=True)
 
+        previous = self._previous_checks(step.number)
         attempts = [
             self._attempt(step, prompt, name, env, lambda: workspace.reset_to(step.number - 1))
         ]
         first = attempts[0].result
-        if first.status in RETRIED_STATUSES and self.options.retry_failed:
-            reason = self._failure_reason(attempts[0])
-            self.log(f"step {step.number}: {first.status}; retrying once in a fresh session")
+        checked: list[CheckResult] | None = None
+        check_dirs: list[Path] = []
+        reason = retry_reason = None
+        if first.status in RETRIED_STATUSES:
+            reason, retry_reason = self._failure_reason(attempts[0]), first.error or first.status
+        elif first.status == OK:
+            checked = self._check(step.number, name, check_dirs)
+            if failures := checks.new_failures(checked, previous):
+                reason = checks.failure_reason(failures)
+                retry_reason = "checks failed: " + ", ".join(r.check.title for r in failures)
+        if reason and self.options.retry_failed:
+            self.log(f"step {step.number}: {retry_reason}; retrying once in a fresh session")
             again = retry_prompt(prompt, reason)
             self.tracker.log_text(run_id, again, "retry-prompt.md")
             checkpoint = workspace.checkpoint()
@@ -240,7 +258,15 @@ class Runner:
                     step, again, f"{name}.retry", env, lambda: workspace.restore(checkpoint)
                 )
             )
+            checked = None
+        if checked is None:
+            checked = self._check(step.number, attempts[-1].events.stem, check_dirs)
         result = attempts[-1].result
+        failures = checks.new_failures(checked, previous)
+        status = FAILED if result.status == OK and failures else result.status
+        error = result.error
+        if failures and not error:
+            error = "checks failed: " + ", ".join(r.check.title for r in failures)
 
         record = workspace.record_step(step.number, run_id)
         branches.sync_to_main(self.repo, workspace)
@@ -249,6 +275,8 @@ class Runner:
             self.tracker.log_artifact(run_id, attempt.events)
             if attempt.stderr.stat().st_size:
                 self.tracker.log_artifact(run_id, attempt.stderr)
+        for directory in check_dirs:
+            self.tracker.log_artifacts(run_id, directory, directory.name)
         self.tracker.log_text(run_id, workspace.diff(step.number), "diff.patch")
 
         trace_tags = {"branch": self.evaluation.branch, "step": str(step.number)}
@@ -269,6 +297,10 @@ class Runner:
             for key, value in attempt.result.metrics().items():
                 metrics[key] = metrics.get(key, 0) + value
         metrics |= workspace.diff_stats(step.number)
+        metrics |= checks.metrics(checked)
+        metrics |= checks.commit_metrics(
+            workspace.agent_commits(step.number), self.evaluation.assisted_by
+        )
         metrics |= {
             "duration_s": duration_s,
             "exit_code": result.exit_code,
@@ -280,22 +312,23 @@ class Runner:
         }
         self.tracker.log_metrics(run_id, metrics)
         tags = {
-            "status": result.status,
+            "status": status,
+            "harness_status": result.status,
             "session_id": first.session_id or "",
             "commit": record.sha,
             "step_tag": record.tag,
         }
         if len(attempts) > 1:
             tags["retry_session_id"] = result.session_id or ""
-            tags["retry_reason"] = (first.error or first.status)[:500]
-        if result.error:
-            tags["error"] = result.error
+            tags["retry_reason"] = (retry_reason or "")[:500]
+        if error:
+            tags["error"] = error[:500]
         self.tracker.set_tags(run_id, tags)
-        self.tracker.end(run_id, "FINISHED" if result.status == OK else "FAILED")
+        self.tracker.end(run_id, "FINISHED" if status == OK else "FAILED")
 
         outcome = StepOutcome(
-            step.number, run_id, result, record, duration_s, rate_limited_retries, trace_ids,
-            retried=len(attempts) > 1,
+            step.number, run_id, status, result, record, duration_s, rate_limited_retries,
+            trace_ids, retried=len(attempts) > 1, checks=checked,
         )  # fmt: skip
         self.log(_summary(outcome))
         return outcome
@@ -338,6 +371,22 @@ class Runner:
             restore()
             self.sleep(wait_s)
 
+    def _previous_checks(self, step: int) -> dict[str, float]:
+        """The metrics of the previous step's run, whose ``check.*`` values say which checks
+        already failed (none for step 1, or if the run is not in MLflow)."""
+        run_ids = [c.run_id for c in self.workspace.step_commits() if c.step == step - 1]
+        return self.tracker.metrics(run_ids[-1]) if run_ids and run_ids[-1] else {}
+
+    def _check(self, step: int, name: str, log_dirs: list[Path]) -> list[CheckResult]:
+        """Run the checks on the session's work, logging to ``runs/<branch>/<name>.checks/``."""
+        if not self.checks:
+            return []
+        log_dir = self.runs_dir / f"{name}.checks"
+        log_dirs.append(log_dir)
+        return checks.run_checks(
+            self.box, self.workspace.path, step, self.checks, log_dir, self.log
+        )
+
     def _failure_reason(self, attempt: Attempt) -> str:
         """What went wrong with ``attempt``, for the retry prompt."""
         if attempt.result.status == TIMEOUT:
@@ -353,13 +402,20 @@ class Runner:
 def _summary(outcome: StepOutcome) -> str:
     result = outcome.result
     minutes, seconds = divmod(round(outcome.duration_s), 60)
-    parts = [f"step {outcome.step}: {result.status} in {minutes}m{seconds:02d}s"]
+    parts = [f"step {outcome.step}: {outcome.status} in {minutes}m{seconds:02d}s"]
     if outcome.retried:
         parts[0] += " after a retry"
     if result.cost_usd is not None:
         parts.append(f"${result.cost_usd:.2f} (notional)")
     parts.append(f"{outcome.record.agent_commits} agent commit(s)")
     parts.append(f"{len(outcome.trace_ids)} trace(s)")
+    ran = [check for check in outcome.checks if check.ran]
+    if ran:
+        failed = [check.check.title for check in ran if check.status == checks.FAILED]
+        parts.append(
+            f"checks {len(ran) - len(failed)}/{len(ran)} passed"
+            + (f" (failed: {', '.join(failed)})" if failed else "")
+        )
     line = ", ".join(parts) + f" -> {outcome.record.tag}"
     if result.error:
         line += f"\n  error: {result.error}"

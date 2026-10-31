@@ -97,6 +97,12 @@ class StepRecord:
 
 
 @dataclass(frozen=True)
+class AgentCommit:
+    subject: str
+    assisted_by: list[str]
+
+
+@dataclass(frozen=True)
 class Checkpoint:
     """A workspace state to return to: HEAD plus a stash commit of any uncommitted changes."""
 
@@ -396,6 +402,21 @@ class Workspace:
     def diff(self, step: int) -> str:
         """The diff from the previous step's tag to ``step``'s tag."""
         return self.git("diff", self._step_range(step))
+
+    def agent_commits(self, step: int) -> list[AgentCommit]:
+        """The commits ``step`` made that the runner did not author, oldest first."""
+        out = self.git(
+            "log",
+            "--reverse",
+            f"--format=%an%x00%s%x00%(trailers:key={ASSISTED_BY_TRAILER},valueonly,unfold)%x1e",
+            self._step_range(step),
+        )
+        commits = []
+        for record in out.split("\x1e"):
+            fields = record.strip("\n").split("\x00")
+            if len(fields) == 3 and fields[0] != RUNNER_NAME:
+                commits.append(AgentCommit(fields[1], fields[2].split()))
+        return commits
 
     def diff_stats(self, step: int) -> dict[str, int]:
         """Files changed and lines added/removed by ``step`` (binary files count as files only)."""
