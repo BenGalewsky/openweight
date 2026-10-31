@@ -12,6 +12,10 @@ containers on a private network ``ow-<name>``:
 The workspace is mounted read-write at ``/workspace`` and ``harness_config/`` read-only at
 ``/harness_config``; nothing else from the host is mounted. The containers persist across steps
 until `Sandbox.down` removes them with their network and volume.
+
+Nothing in the sandbox is published on the host. To reach an app running in it, `Sandbox.forward`
+starts ``ow-<name>-fwd-<port>`` containers on the evaluation's network that relay a host loopback
+port to the dind container's address, so the app must listen on all interfaces, not just loopback.
 """
 
 import os
@@ -33,6 +37,8 @@ DOCKER_PORT = 2375
 WORKSPACE_MOUNT = "/workspace"
 HARNESS_CONFIG_MOUNT = "/harness_config"
 LABEL = "openweight.evaluation"
+ROLE_LABEL = "openweight.role"
+FORWARD_IMAGE = "alpine/socat:1.8.1.1"
 DIND_TIMEOUT_S = 60
 # Exit status of `timeout` when the command ran out of time (it is killed 10s later if need be).
 TIMEOUT_EXIT = 124
@@ -114,6 +120,30 @@ class Limits:
     dind_memory: str = "4g"
 
 
+@dataclass(frozen=True)
+class Forward:
+    """A sandbox port published on the host's loopback."""
+
+    host_port: int
+    port: int
+
+    @classmethod
+    def parse(cls, spec: str) -> "Forward":
+        """``PORT`` (the same on both sides) or ``HOST_PORT:PORT``."""
+        host, _, port = spec.rpartition(":")
+        try:
+            forward = cls(int(host or port), int(port))
+        except ValueError:
+            raise ValueError(f"expected PORT or HOST_PORT:PORT, got {spec!r}") from None
+        if not all(0 < p < 65536 for p in (forward.host_port, forward.port)):
+            raise ValueError(f"port out of range in {spec!r}")
+        return forward
+
+    @property
+    def url(self) -> str:
+        return f"http://localhost:{self.host_port}"
+
+
 class Sandbox:
     """The containers, network, and volume of one evaluation."""
 
@@ -152,6 +182,9 @@ class Sandbox:
     def volume(self) -> str:
         return f"ow-{self.name}-dind"
 
+    def forwarder(self, host_port: int) -> str:
+        return f"ow-{self.name}-fwd-{host_port}"
+
     def dind_args(self) -> list[str]:
         """``docker run`` arguments for the dind container."""
         return [
@@ -186,6 +219,22 @@ class Sandbox:
             "--volume", f"{self.harness_config.resolve()}:{HARNESS_CONFIG_MOUNT}:ro",
             "--workdir", WORKSPACE_MOUNT,
             self.image,
+        ]  # fmt: skip
+
+    def forward_args(self, forward: Forward) -> list[str]:
+        """``docker run`` arguments for a forwarder: host loopback to the dind container's port.
+        It sits on the evaluation's network, as a container sharing dind's namespace cannot publish
+        ports; socat resolves the dind container's name per connection, so it survives a restart."""
+        return [
+            "run", "--detach",
+            "--name", self.forwarder(forward.host_port),
+            "--label", f"{LABEL}={self.name}",
+            "--label", f"{ROLE_LABEL}=forward",
+            "--network", self.network,
+            "--publish", f"127.0.0.1:{forward.host_port}:{forward.port}",
+            FORWARD_IMAGE,
+            f"TCP-LISTEN:{forward.port},fork,reuseaddr",
+            f"TCP:{self.dind}:{forward.port}",
         ]  # fmt: skip
 
     def exec_args(
@@ -277,11 +326,37 @@ class Sandbox:
                 raise SandboxError(f"{self.dind} not ready after {DIND_TIMEOUT_S}s")
             time.sleep(0.5)
 
+    def forward(self, forwards: Sequence[Forward]) -> None:
+        """Publish sandbox ports on the host's loopback, replacing forwarders of the same host
+        ports."""
+        self._require_up()
+        for forward in forwards:
+            name = self.forwarder(forward.host_port)
+            if self.state(name) is not None:
+                docker("rm", "--force", name)
+            docker(*self.forward_args(forward))
+
+    def forwarders(self) -> list[str]:
+        out = docker(
+            "ps", "--all", "--filter", f"label={LABEL}={self.name}",
+            "--filter", f"label={ROLE_LABEL}=forward", "--format", "{{.Names}}",
+        ).stdout  # fmt: skip
+        return sorted(out.split())
+
+    def unforward(self, host_ports: Sequence[int] = ()) -> list[str]:
+        """Remove the forwarders of ``host_ports`` (all of them if none). Returns their names."""
+        names = [self.forwarder(p) for p in host_ports] if host_ports else self.forwarders()
+        removed = [name for name in names if self.state(name) is not None]
+        for name in removed:
+            docker("rm", "--force", name)
+        return removed
+
     def down(self) -> list[str]:
         """Remove the containers, network, and dind volume. Returns what was removed."""
         check_docker()
         removed = []
-        for container in (self.agent, self.dind):
+        # Forwarders first: the network cannot be removed while they are attached.
+        for container in (*self.forwarders(), self.agent, self.dind):
             if self.state(container) is not None:
                 docker("rm", "--force", "--volumes", container)
                 removed.append(container)
@@ -328,12 +403,13 @@ class Sandbox:
             check=False,
         )
 
-    def shell(self, command: Sequence[str] = ("bash", "--login")) -> int:
+    def shell(
+        self, command: Sequence[str] = ("bash", "--login"), workdir: str = WORKSPACE_MOUNT
+    ) -> int:
         """Run an interactive command (by default a shell) attached to this terminal."""
         self._require_up()
-        return subprocess.run(
-            ["docker", *self.exec_args(command, interactive=True)], check=False
-        ).returncode
+        args = self.exec_args(command, interactive=True, workdir=workdir)
+        return subprocess.run(["docker", *args], check=False).returncode
 
 
 def list_sandboxes() -> dict[str, dict[str, str]]:

@@ -1,3 +1,6 @@
+import socket
+import time
+import urllib.request
 import uuid
 from collections.abc import Iterator
 from pathlib import Path
@@ -63,6 +66,24 @@ def test_container_args(tmp_path: Path) -> None:
     assert "--cpus=2" in agent
     assert volumes(agent) == [f"{tmp_path}/ws:/workspace", f"{tmp_path}/hc:/harness_config:ro"]
     assert volumes(dind) == ["ow-x-dind:/var/lib/docker"]
+
+
+def test_forward_parse() -> None:
+    assert sandbox.Forward.parse("5173") == sandbox.Forward(5173, 5173)
+    assert sandbox.Forward.parse("15173:5173") == sandbox.Forward(15173, 5173)
+    assert sandbox.Forward(15173, 5173).url == "http://localhost:15173"
+    for spec in ("web", "1:2:3", "0", "70000:80"):
+        with pytest.raises(ValueError):
+            sandbox.Forward.parse(spec)
+
+
+def test_forward_args(tmp_path: Path) -> None:
+    args = Sandbox("x", tmp_path, tmp_path).forward_args(sandbox.Forward(15173, 5173))
+    assert args[args.index("--name") + 1] == "ow-x-fwd-15173"
+    assert args[args.index("--network") + 1] == "ow-x"
+    # Loopback only on the host; the far end is dind, whose namespace the agent shares.
+    assert args[args.index("--publish") + 1] == "127.0.0.1:15173:5173"
+    assert args[-2:] == ["TCP-LISTEN:5173,fork,reuseaddr", "TCP:ow-x-dind:5173"]
 
 
 def volumes(args: list[str]) -> list[str]:
@@ -217,6 +238,48 @@ def test_compose_postgres_on_localhost(live: tuple[Path, str, Sandbox]) -> None:
 
 
 @pytest.mark.docker
+def test_forward_reaches_agent_server(
+    live: tuple[Path, str, Sandbox], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo, branch, box = live
+    monkeypatch.chdir(repo)
+    box.up()
+    (box.workspace / "index.html").write_text("hello from the sandbox\n")
+    server = "uv run --no-project python -m http.server 8000 --bind 0.0.0.0"
+    agent_sh(box, f"nohup {server} >/dev/null 2>&1 &")
+    port = free_port()
+    result = CliRunner().invoke(app, ["sandbox", "forward", branch, f"{port}:8000"])
+    assert result.exit_code == 0, result.output
+    assert f"http://localhost:{port}  ->  sandbox port 8000" in result.output
+    assert box.forwarders() == [box.forwarder(port)]
+    assert fetch(f"http://localhost:{port}/index.html") == "hello from the sandbox\n"
+
+    result = CliRunner().invoke(app, ["sandbox", "forward", branch, "--stop"])
+    assert result.exit_code == 0, result.output
+    assert f"removed {box.forwarder(port)}" in result.output
+    assert box.forwarders() == []
+    box.exec(["pkill", "--full", "http.server"])
+
+
+def free_port() -> int:
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+def fetch(url: str, timeout_s: float = 30) -> str:
+    deadline = time.monotonic() + timeout_s
+    while True:
+        try:
+            with urllib.request.urlopen(url, timeout=5) as response:
+                return response.read().decode()
+        except OSError:
+            if time.monotonic() > deadline:
+                raise
+            time.sleep(0.5)
+
+
+@pytest.mark.docker
 def test_up_after_dind_stops(live: tuple[Path, str, Sandbox]) -> None:
     _, _, box = live
     box.up()
@@ -233,10 +296,12 @@ def test_cli_down(live: tuple[Path, str, Sandbox], monkeypatch: pytest.MonkeyPat
     repo, branch, box = live
     monkeypatch.chdir(repo)
     box.up()
+    box.forward([sandbox.Forward(free_port(), 8000)])
     result = CliRunner().invoke(app, ["sandbox", "down", branch])
     assert result.exit_code == 0, result.output
     assert f"removed volume {box.volume}" in result.output
     assert box.status() == {"dind": None, "agent": None}
+    assert box.forwarders() == []
     assert box.name not in sandbox.list_sandboxes()
     assert (box.workspace / "compose.yaml").exists()
     result = CliRunner().invoke(app, ["sandbox", "down", branch])

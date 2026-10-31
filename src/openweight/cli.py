@@ -5,7 +5,7 @@ from typing import Annotated
 
 import typer
 
-from openweight import branches, harnesses, promptdb, runner, sandbox, tracking
+from openweight import branches, harnesses, promptdb, runner, sandbox, serve, tracking
 
 app = typer.Typer(no_args_is_help=True, help="Evaluate coding harnesses and models on PromptDB.")
 prompts_app = typer.Typer(no_args_is_help=True, help="Inspect the parsed benchmark prompts.")
@@ -20,6 +20,12 @@ PromptDBPath = Annotated[
     typer.Option("--promptdb", exists=True, dir_okay=False, help="Path to PromptDB.md."),
 ]
 Branch = Annotated[str, typer.Argument(help="Eval branch, e.g. eval/opencode/lumen--glm-5.3.")]
+Ports = Annotated[
+    list[str] | None,
+    typer.Option(
+        "--port", "-p", help="PORT or HOST_PORT:PORT to forward from localhost (repeatable)."
+    ),
+]
 IncludeStep43 = Annotated[
     bool,
     typer.Option("--include-step-43", help="Include the 'Not yet committed' follow-up step."),
@@ -110,6 +116,18 @@ def _sandbox(branch: str) -> sandbox.Sandbox:
 def _fail(e: Exception) -> typer.Exit:
     typer.echo(f"error: {e}", err=True)
     return typer.Exit(1)
+
+
+def _forwards(specs: list[str]) -> list[sandbox.Forward]:
+    try:
+        return [sandbox.Forward.parse(spec) for spec in specs]
+    except ValueError as e:
+        raise typer.BadParameter(str(e), param_hint="--port") from None
+
+
+def _echo_forwards(forwards: list[sandbox.Forward]) -> None:
+    for forward in forwards:
+        typer.echo(f"{forward.url}  ->  sandbox port {forward.port}")
 
 
 @app.command("run")
@@ -233,3 +251,64 @@ def list_sandboxes() -> None:
     for name, containers in sorted(found.items()):
         states = "  ".join(f"{c} {state}" for c, state in sorted(containers.items()))
         typer.echo(f"{name}  {states}")
+
+
+@sandbox_app.command("forward")
+def sandbox_forward(
+    branch: Branch,
+    ports: Annotated[
+        list[str] | None, typer.Argument(help="PORT or HOST_PORT:PORT; all forwarders if --stop.")
+    ] = None,
+    stop: Annotated[bool, typer.Option("--stop", help="Remove forwarders instead.")] = False,
+) -> None:
+    """Forward sandbox ports to localhost until stopped (or the sandbox goes down).
+
+    The server in the sandbox must listen on all interfaces, e.g. vite --host 0.0.0.0.
+    """
+    box = _sandbox(branch)
+    forwards = _forwards(ports or [])
+    try:
+        if stop:
+            removed = box.unforward([forward.host_port for forward in forwards])
+            for name in removed or ["no forwarders"]:
+                typer.echo(f"removed {name}" if removed else name)
+            return
+        if not forwards:
+            raise typer.BadParameter("give at least one port", param_hint="PORTS")
+        box.forward(forwards)
+    except (sandbox.DockerError, sandbox.SandboxError) as e:
+        raise _fail(e) from None
+    _echo_forwards(forwards)
+
+
+@app.command("serve", context_settings={"allow_extra_args": True, "ignore_unknown_options": True})
+def serve_app(ctx: typer.Context, branch: Branch, ports: Ports = None) -> None:
+    """Run an implementation's app in its sandbox, forwarded to localhost. Ctrl-C stops it.
+
+    Default: docker compose up --build (ports 3000, 9001) with a compose file.
+
+    Without one: the SvelteKit dev server in web/ (port 5173).
+
+    Or give a command after --; it runs in /workspace and must listen on all interfaces.
+    """
+    box = _sandbox(branch)
+    if ctx.args:
+        launch = serve.Launch(ctx.args)
+    else:
+        try:
+            launch = serve.default_launch(box.workspace)
+        except serve.ServeError as e:
+            raise _fail(e) from None
+    forwards = _forwards(ports) if ports else launch.forwards
+    try:
+        for action in box.up():
+            typer.echo(action)
+        box.forward(forwards)
+    except (sandbox.DockerError, sandbox.SandboxError) as e:
+        raise _fail(e) from None
+    _echo_forwards(forwards)
+    try:
+        code = box.shell(launch.command, workdir=launch.workdir)
+    finally:
+        box.unforward([forward.host_port for forward in forwards])
+    raise typer.Exit(code)

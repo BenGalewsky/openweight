@@ -226,6 +226,16 @@ the label `openweight.evaluation=<name>`.
 - `openweight sandbox shell <branch> [command...]` opens a shell (or runs a command) as the agent.
 - `openweight sandbox list` shows every evaluation's containers on the Docker host.
 
+**Reaching the app.** Nothing in the sandbox is published on the host, and a container that
+shares dind's network namespace cannot publish ports itself. `openweight sandbox forward <branch>
+[HOST_PORT:]PORT` instead starts an `ow-<name>-fwd-<host port>` container (`alpine/socat`) on the
+evaluation's network that listens on `127.0.0.1:<host port>` on the host and relays to
+`ow-<name>-dind:<port>`. The server must therefore listen on all interfaces in the sandbox, which
+compose-published ports do and `vite dev --host 0.0.0.0` does. `openweight serve <branch>` wraps
+this: it brings the sandbox up, forwards the app's ports, and runs the app in the foreground (the
+dev server in `web/`, or `docker compose up --build` once the branch has a compose file), removing
+the forwarders when it exits. `sandbox down` removes any forwarders left over.
+
 ### Tracking progress in git
 
 Every step commit carries trailers, so the branch itself is the state — no local state file:

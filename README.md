@@ -43,9 +43,27 @@ uv run openweight run --harness claude --model claude-sonnet-5-5 --effort high -
 uv run openweight run --harness claude --model claude-sonnet-5-5 --effort high --until 10
 uv run openweight run --harness claude --model claude-sonnet-5-5 --effort high --steps 1 --reset
 uv run openweight run --harness opencode --model lumen/glm-5.3 --steps 1
+uv run openweight serve eval/claude/claude-sonnet-5-5-high               # try the app on localhost
+uv run openweight serve eval/opencode/lumen--glm-5.3 --port 5174:5173     # alongside another one
+uv run openweight serve eval/claude/claude-sonnet-5-5-high -p 4173 -- \
+  sh -c 'cd web && npm run build && npm run preview -- --host 0.0.0.0'
+uv run openweight sandbox forward eval/claude/claude-sonnet-5-5-high 3000 # forward a running server
+uv run openweight sandbox forward eval/claude/claude-sonnet-5-5-high --stop
 uv run pytest                               # framework tests
 uv run pytest --docker                      # also start real sandbox containers
 ```
+
+### Trying an implementation
+
+`serve` starts an evaluation's app in its sandbox (bringing the sandbox up if needed) and forwards
+its port to `localhost` on the host; Ctrl-C stops the app and the forwarding. What it starts
+depends on how far the branch has got: the SvelteKit dev server in `web/` on
+<http://localhost:5173> until there is a compose file (step 16), then `docker compose up --build`
+with the web app on <http://localhost:3000> and the RustFS console on <http://localhost:9001>. It
+uses the workspace as it is, at the branch's latest step. To run two implementations at once, map
+one to other host ports with `--port HOST_PORT:PORT`. To run something else, put the command after
+`--`; it runs in `/workspace` and has to listen on `0.0.0.0` (e.g. `vite dev --host 0.0.0.0`),
+since the forwarder reaches the sandbox over its network rather than its loopback.
 
 ## Status
 
