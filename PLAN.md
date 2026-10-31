@@ -12,8 +12,8 @@ For each `(harness, model)` pair we:
 1. Run every prompt in order, one agent session per step, on a dedicated git branch.
 2. Commit the result of each step to that branch.
 3. Log each step (traces, cost, timing, objective checks) to MLflow GenAI.
-4. On request, have a frontier model review the implementations and log quality scores to MLflow,
-   so pairs can be compared step by step and overall.
+4. On request, have a frontier model review the implementations at the end of each PromptDB phase
+   and log quality scores to MLflow, so pairs can be compared phase by phase and overall.
 
 ## Repository layout
 
@@ -454,35 +454,51 @@ runner did not author) with a conventional-commit subject (`commits_conventional
 
 ## Review (`openweight review`)
 
-Run on request, separately from implementation:
+Run on request, separately from implementation. The unit of review is a **phase**: PromptDB's
+seven phases (steps 1–13, 14–16, 17–20, 21–29, 30–35, 36–38, 39–42) are reviewed once each, when
+every step in them has run, rather than step by step. A phase is a coherent piece of the app, so
+the judge sees a change it can assess as a whole, and the cost is 7 judge sessions per branch
+instead of 42.
 
 ```
-uv run openweight review --branch eval/claude/claude-sonnet-5-5 [--steps 1-42] [--judge <model>]
+uv run openweight review --branch eval/claude/claude-sonnet-5-5-high [--phases 1-7] [--judge <model>]
 uv run openweight review --all            # every eval/* branch, for a leaderboard
 ```
 
-- Input per step: the step prompt, the diff `step-(N-1)..step-N`, check results, and read access
-  to the workspace at that tag (the judge runs as an agent with read-only tools so it can inspect
-  files beyond the diff).
-- The judge is **blind**: harness/model names and `Assisted-by` trailers are stripped from what
-  it sees.
-- Rubric (each 1–5 with a written rationale):
-  - **Completeness** — every requirement in the step prompt is implemented.
+- `--phases` defaults to every complete phase not yet reviewed; a phase whose last step has not
+  run is refused.
+- Input per phase: the phase's step prompts, the diff from the tag of the step before the phase to
+  the tag of its last step (e.g. `step-13..step-16` for phase 2), each step's check results, and
+  read access to the code at the phase's last tag (the judge runs as an agent with read-only tools
+  so it can inspect files beyond the diff). The code comes from a read-only copy built from the
+  main repository's tags, never from the live workspace.
+- The judge also gets the agent's commit messages in the phase, which the Process criterion
+  scores. It is **blind**: harness/model names are stripped from what it sees, and so are the
+  `Assisted-by` and `Eval-*` trailers (whether the agent wrote `Assisted-by` is already measured
+  by `commits_assisted_by`).
+- Rubric (each 1–5 with a written rationale), applied to the phase as a whole:
+  - **Completeness** — every requirement in the phase's step prompts is implemented.
   - **Correctness** — the code would work; no obvious bugs; checks pass.
   - **Code quality** — idiomatic Svelte 5 / Drizzle / Dagster, readable, no dead code.
-  - **Consistency** — fits the existing codebase; no regressions of earlier steps.
+  - **Consistency** — fits the existing codebase; no regressions of earlier phases.
   - **Scope discipline** — no unrequested features, no reproduced reverted history.
-  - **Process** — commit messages, trailers, tests added where asked.
-- Scores are logged as MLflow **assessments/feedback** on the step's trace and as metrics on the
-  step run (`review.<criterion>`), with the judge model recorded as the source.
+  - **Process** — commit messages, tests added where asked.
+- Each phase review is a child run of the branch's parent run (`phase-N-review`, tags
+  `openweight.role=review`, `phase`, `first_step`, `last_step`, `commit` of the last step's tag,
+  `judge`), with the scores as metrics (`review.<criterion>`) and the rationales as an artifact.
+  The judge session's trace is linked to it and carries the scores as MLflow
+  **assessments/feedback**, with the judge model recorded as the source.
+- Rerunning a step with `--reset` tags the reviews of its phase and every later phase
+  `openweight.superseded=true`, as it does the step runs, since the code they judged is gone.
 - With only a Claude subscription (no API key), the judge cannot be an `mlflow.genai` LLM judge that
   calls the Anthropic API directly. Instead it runs as a headless `claude -p --effort high` session
-  in a sandbox with read-only tools and the workspace checked out at the step's tag, returns JSON
+  in a sandbox with read-only tools and the code checked out at the phase's last tag, returns JSON
   scores against the rubric, and the runner writes them with `mlflow.log_feedback`.
 - A final whole-branch review scores the end state (architecture, overall app quality) once all
-  steps are done.
+  steps are done, after phase 7's review.
 - `openweight report` produces a comparison table (per pair: total cost, time, check pass rate,
-  mean review scores, per-phase breakdown) from MLflow.
+  mean review scores, per-phase breakdown) from MLflow. Step metrics (cost, time, checks) roll up
+  into the same phases, so each phase's review sits next to what it cost.
 
 ## Implementation milestones
 
@@ -501,7 +517,7 @@ uv run openweight review --all            # every eval/* branch, for a leaderboa
    failure policy (already in place for harness errors and timeouts) to failed checks.
 7. **Full run** — one complete 42-step run per harness with a baseline model; fix runner
    robustness issues (timeouts, failed steps, resume).
-8. **Review** — judge, rubric, MLflow assessments, `report` command.
+8. **Review** — per-phase judge, rubric, MLflow assessments, `report` command.
 9. **Matrix** — `matrix.toml` with the five pairs above; `openweight run --matrix [--parallel N]`.
 
 ## Open questions
@@ -514,9 +530,10 @@ To resolve before milestone 4.
    then the runner continues (see Runner, step 7).
 4. **MLflow server.** *Resolved:* the tracking server runs MLflow 3.17, which supports GenAI traces
    and assessments (≥ 3.4 needed); the client is pinned to `mlflow>=3.17.2` to match.
-5. **Judge model and cadence.** Which frontier model is the reviewer (and should we use two judges
-   from different vendors to reduce self-preference bias, since Claude would be judging Claude)?
-   Review every step, only phase boundaries, or only the final state?
+5. **Judge model and cadence.** *Cadence resolved:* one review per phase, plus a final
+   whole-branch review (see Review). Still open: which frontier model is the reviewer, and should
+   we use two judges from different vendors to reduce self-preference bias, since Claude would be
+   judging Claude?
 6. **Budget.** Per-step and per-run cost/time caps? 42 steps × several pairs adds up quickly.
 7. **Remote.** *Resolved:* branches stay local and are never pushed.
 8. **Step 43.** *Resolved:* excluded; evaluations run steps 1–42.
