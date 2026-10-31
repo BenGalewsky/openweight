@@ -82,8 +82,7 @@ workspaces/                     # gitignored: one standalone git repo per eval b
   Ornith is declared with `"tool_call": true`: Lumen returns proper tool calls for it (checked
   2026-10-29), and without the flag OpenCode would not offer it any tools at all. (OpenCode 2
   ignores the 1.x `"reasoning": true` flag, so it is not set; reasoning output is parsed anyway.)
-- Ornith runs on 1.0 for now because Lumen does not serve `ornith-1.5-35b` yet. When it does,
-  1.5 gets its own branch (`eval/opencode/lumen--ornith-1.5-35b`) alongside the 1.0 results.
+- Ornith runs on 1.0 for the duration of the project.
 - At startup the runner checks each OpenCode model id against the provider's model list
   (`<baseURL>/models`, with the provider's settings from `opencode.json`) and refuses to start an
   evaluation for a model that isn't served. Claude Code models have no such list on a subscription;

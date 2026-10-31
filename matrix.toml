@@ -20,4 +20,4 @@ model = "lumen/qwen3.8-flash"
 
 [[eval]]
 harness = "opencode"
-model = "lumen/ornith-1.0-35b"  # switch to ornith-1.5-35b once Lumen serves it
+model = "lumen/ornith-1.0-35b"
