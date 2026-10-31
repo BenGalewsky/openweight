@@ -5,11 +5,16 @@ from pathlib import Path
 from typing import Protocol
 
 from openweight.branches import Evaluation
+from openweight.sandbox import Sandbox
 
 OK = "ok"
 FAILED = "failed"
 TIMEOUT = "timeout"
 RATE_LIMITED = "rate_limited"
+
+
+class HarnessError(RuntimeError):
+    """The harness cannot run the evaluation, e.g. its model is not served."""
 
 
 @dataclass(frozen=True)
@@ -49,11 +54,26 @@ class Harness(Protocol):
     name: str
     # Environment variables holding this harness's model credentials, passed into the sandbox.
     credentials: tuple[str, ...]
+    # Whether the harness writes its traces from inside the sandbox, which then needs the MLFLOW_*
+    # variables. Harnesses that do not get no MLflow credentials there.
+    traces_in_sandbox: bool
+    # Whether `command` reads the prompt from stdin instead of taking it as an argument.
+    prompt_on_stdin: bool
+
+    def check(self, evaluation: Evaluation) -> None:
+        """Raise `HarnessError` if the evaluation cannot run, e.g. its model is not served."""
+        ...
 
     def command(self, prompt: str, evaluation: Evaluation, session_id: str) -> list[str]:
         """The command that runs one non-interactive session in ``/workspace``, writing its JSON
         event stream to stdout. Harnesses that cannot choose a session id ignore ``session_id``
         and report their own in `StepResult`."""
+        ...
+
+    def finish(self, box: Sandbox, events: Path) -> None:
+        """Run on the host after each session (also after a timeout), before `parse`: append to
+        ``events`` what the harness keeps outside its event stream and write the traces its own
+        tracing does not."""
         ...
 
     def parse(self, events: Path, exit_code: int) -> StepResult:

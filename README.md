@@ -42,17 +42,19 @@ uv run openweight sandbox list              # sandboxes on this Docker host
 uv run openweight run --harness claude --model claude-sonnet-5-5 --effort high --steps 1
 uv run openweight run --harness claude --model claude-sonnet-5-5 --effort high --until 10
 uv run openweight run --harness claude --model claude-sonnet-5-5 --effort high --steps 1 --reset
+uv run openweight run --harness opencode --model lumen/glm-5.3 --steps 1
 uv run pytest                               # framework tests
 uv run pytest --docker                      # also start real sandbox containers
 ```
 
 ## Status
 
-Milestones 1 (skeleton and PromptDB parsing), 2 (eval branches and workspaces), 3 (sandbox), and
-4 (Claude harness) are done. `workspace open` creates the orphan eval branch in
-`workspaces/<harness>--<model-slug>/` with the benchmark inputs in place, and `sandbox up` starts
-that evaluation's agent container and private Docker daemon around it. `run` drives Claude Code
-through the steps in that sandbox: each step becomes a tagged commit on the branch and a child run
-of the branch's MLflow run, with the session's trace linked to it and the event stream kept in
-`runs/<branch>/`. The OpenCode driver, objective checks, and reviewer are not implemented yet; see
-the milestones in [PLAN.md](PLAN.md).
+Milestones 1 (skeleton and PromptDB parsing), 2 (eval branches and workspaces), 3 (sandbox), 4
+(Claude harness), and 5 (OpenCode harness) are done. `workspace open` creates the orphan eval branch
+in `workspaces/<harness>--<model-slug>/` with the benchmark inputs in place, and `sandbox up` starts
+that evaluation's agent container and private Docker daemon around it. `run` drives Claude Code or
+OpenCode through the steps in that sandbox: each step becomes a tagged commit on the branch and a
+child run of the branch's MLflow run, with the session's trace linked to it and the event stream
+kept in `runs/<branch>/`. OpenCode traces are written by the runner from OpenCode's session
+exports, as the `@mlflow/opencode` plugin does not load in OpenCode 2. Objective checks and the
+reviewer are not implemented yet; see the milestones in [PLAN.md](PLAN.md).

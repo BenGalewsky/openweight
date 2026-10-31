@@ -43,7 +43,7 @@ main
 │   ├── harnesses/
 │   │   ├── base.py             # Harness protocol + StepResult
 │   │   ├── claude.py           # `claude -p` driver
-│   │   └── opencode.py         # `opencode run` driver
+│   │   └── opencode.py         # `opencode run` driver; writes OpenCode traces from session exports
 │   ├── runner.py               # step loop: sandbox exec, step commits, MLflow logging
 │   ├── checks.py               # objective checks run after each step
 │   ├── tracking.py             # MLflow experiment/run/trace helpers
@@ -52,7 +52,7 @@ main
 │       └── judge.py            # frontier-model review -> MLflow assessments
 ├── harness_config/
 │   ├── claude.settings.json    # enables MLflow tracing, turns off commit attribution
-│   ├── opencode.json           # @mlflow/opencode plugin + permissions, Svelte MCP, Dagster skills
+│   ├── opencode.json           # Lumen provider, allow-all permissions, Svelte MCP, Dagster skills
 │   ├── mcp.json                # Svelte MCP server (required by the prompts)
 │   └── plugins/                # vendored Claude Code plugins (dagster-io/skills @ a9ba4bb, Apache-2.0)
 │       ├── dagster-expert/     #   loaded by Claude via --plugin-dir, by OpenCode via "skills" paths
@@ -80,11 +80,14 @@ workspaces/                     # gitignored: one standalone git repo per eval b
   the `lumen` provider with `apiKey: "{env:LUMEN_API_KEY}"`, so the user's own
   `~/.config/opencode/opencode.json` (which holds the key inline) is never mounted into the sandbox.
   Ornith is declared with `"tool_call": true`: Lumen returns proper tool calls for it (checked
-  2026-10-29), and without the flag OpenCode would not offer it any tools at all.
+  2026-10-29), and without the flag OpenCode would not offer it any tools at all. (OpenCode 2
+  ignores the 1.x `"reasoning": true` flag, so it is not set; reasoning output is parsed anyway.)
 - Ornith runs on 1.0 for now because Lumen does not serve `ornith-1.5-35b` yet. When it does,
   1.5 gets its own branch (`eval/opencode/lumen--ornith-1.5-35b`) alongside the 1.0 results.
-- At startup the runner checks each model id against the provider's model list and refuses to start
-  an evaluation for a model that isn't served.
+- At startup the runner checks each OpenCode model id against the provider's model list
+  (`<baseURL>/models`, with the provider's settings from `opencode.json`) and refuses to start an
+  evaluation for a model that isn't served. Claude Code models have no such list on a subscription;
+  Claude Code rejects an unknown model itself.
 
 ## Branch model
 
@@ -166,15 +169,16 @@ OrbStack (linux/arm64).
 **Image (`openweight-sandbox`)** built from `sandbox/Dockerfile` by `openweight sandbox build`:
 Debian 13 with Node 22 (`node:22-trixie-slim`), `uv` with Python 3.13 preinstalled (as steps 1
 and 21 require), `mdbtools` (`mdb-tables`, `mdb-json`), `postgresql-client`, `git`, the Docker CLI
-with compose and buildx plugins, `mlflow`, the `@mlflow/claude-code` tracing plugin (pinned by
+with compose and buildx plugins, the `@mlflow/claude-code` tracing plugin (pinned by
 `MLFLOW_CLAUDE_CODE_VERSION`; see MLflow tracking), and the harness CLIs
-pinned to the versions on the host (`claude` 2.1.312, `opencode` 2.0.23) plus the
-`@mlflow/opencode` plugin. OpenCode 2 is published on npm as `@opencode/cli` (the `opencode-ai`
-package stops at 1.x). The Dockerfile's `ARG *_VERSION` defaults are the only place the pins are
+pinned to the versions on the host (`claude` 2.1.312, `opencode` 2.0.23). OpenCode 2 is published
+on npm as `@opencode/cli` (the `opencode-ai` package stops at 1.x). The Dockerfile's `ARG *_VERSION` defaults are the only place the pins are
 written; `sandbox.py` reads them to name the tag (`openweight-sandbox:claude-2.1.312-opencode-2.0.23`)
 and to report `harness_version`, which the runner logs. Auto-updaters are disabled.
-`@mlflow/opencode` 0.4.0 declares a peer dependency on `@opencode-ai/plugin` ^1; whether it works
-with OpenCode 2 is checked in milestone 5.
+There is no OpenCode tracing plugin in the image: `@mlflow/opencode` 0.4.0 (the latest) is an
+OpenCode 1 plugin, and OpenCode 2 refuses to load it ("Plugin must export a default definition
+with an id and an effect or setup function"; checked 2026-10-30). The runner writes OpenCode traces
+on the host instead (see MLflow tracking), so the image no longer needs the `mlflow` CLI either.
 
 **Mounts**
 
@@ -193,12 +197,14 @@ workspace (see Branch model), so the originals in `db/` and `data/` are out of r
   `openweight-agent` and `safe.directory=*`, so git accepts the bind-mounted workspace whatever
   uid owns it on the host. (OrbStack maps bind-mount ownership to the accessing user anyway.)
 - Permission prompts are disabled, which is what the container boundary is for:
-  `claude --dangerously-skip-permissions`, `opencode run --auto` with an allow-all permission
-  block in `opencode.json`.
+  `claude --dangerously-skip-permissions`, `opencode run --auto` with an allow-all `permissions`
+  rule in `opencode.json` (`--auto` alone already allows `.env` files and paths outside the
+  workspace; the rule keeps it that way if OpenCode's defaults gain a deny).
 - Environment passed in: `CLAUDE_CODE_OAUTH_TOKEN` (Claude runs only; a Claude subscription token
   from `claude setup-token`, as there is no Anthropic API key),
-  `LUMEN_API_KEY` (OpenCode runs only), the `MLFLOW_*` variables, the step's MLflow run id,
-  and `OPENWEIGHT_HARNESS_CONFIG=/harness_config`. Each harness sees only its own model credential.
+  `LUMEN_API_KEY` (OpenCode runs only), the `MLFLOW_*` variables (Claude runs only, for the tracing
+  plugin; OpenCode is traced from the host), and `OPENWEIGHT_HARNESS_CONFIG=/harness_config`. Each
+  harness sees only its own model credential.
   Credentials are passed per `docker exec` as `--env NAME` with the value in docker's own
   environment, so they never appear in process arguments or in `docker inspect`.
 - Network egress is open (npm, PyPI, Docker Hub, the model APIs, the Svelte MCP server, MLflow).
@@ -280,8 +286,12 @@ For each step:
      Claude Code's own commit and PR attribution (`Co-Authored-By`, "Generated with"), so commit
      messages carry only what PromptDB's conventions ask for, as with OpenCode, and the blind
      reviewer is not handed the harness's name.
-   - **OpenCode:** `opencode run --standalone --model <provider/model> --format json --auto
-     "<prompt>"`, with `OPENCODE_CONFIG=/harness_config/opencode.json`.
+   - **OpenCode:** `opencode run --standalone --model <provider/model> --format json --auto`,
+     with `OPENCODE_CONFIG=/harness_config/opencode.json` and the prompt on stdin: OpenCode wraps
+     a message given as an argument in quotes and escapes the double quotes inside it.
+     `--standalone` runs a private server, so no background service is left in the container.
+     An effort level, if set, becomes the model variant (`provider/model#effort`). OpenCode picks
+     its own session id; the runner reads it from the event stream.
    - Fresh session per step (the previous steps' context lives in the code and git history,
      as it would for a human developer picking up the next ticket).
    - Wall-clock timeout per step (default 60 min). No dollar cap: Claude runs on a subscription
@@ -296,6 +306,15 @@ For each step:
      `--reset` reruns earlier steps: it resets the branch to the tag before the first one and tags
      the discarded steps' MLflow runs `openweight.superseded=true`.
 4. Capture the JSON event stream to `runs/<branch>/step-NN.jsonl` and log it as an MLflow artifact.
+   OpenCode's stream lacks the session totals (the last model call never gets its `step_finish`,
+   and subagents run in child sessions whose events are not in it), so after each OpenCode session,
+   timed-out ones included, the runner runs `opencode session export` on the session and,
+   recursively, on every subagent session it started, and appends the exports to the same file as
+   `openweight.session` events. Tokens, cost and tool calls come from those exports (all sessions);
+   `num_turns` counts the top-level session's model calls, as Claude Code's does. The export's
+   outcome also decides whether the session succeeded: on the first step-1 run (2026-10-30)
+   `opencode run` 2.0.23 exited 1, with nothing on stderr or in its log, after a session it
+   recorded as `succeeded`, which cost a needless retry. Without an export the exit code decides.
 5. If the agent left uncommitted changes, the runner commits them itself
    (`chore(eval): uncommitted changes from step N`) and records `agent_committed=false`.
    If the agent made no commits at all, an empty commit with the trailers is created so the step
@@ -367,18 +386,26 @@ conventional-commit format and `Assisted-by` trailer were followed.
     marketplace at run time; instead the sandbox image pins the npm package and the runner loads it
     with `--plugin-dir`. Its Stop hook writes one trace per session; `claude.settings.json` sets
     `MLFLOW_CLAUDE_TRACING_ENABLED`, and the `MLFLOW_*` variables come from the environment.
-  - OpenCode: the `@mlflow/opencode` plugin listed in `harness_config/opencode.json`.
-  - Neither plugin can attach a trace to a given run, so after each step the runner finds the
-    session's traces by their `mlflow.trace.session` metadata, links them to the step run
-    (`link_traces_to_run`), and tags them `branch` and `step`. A session killed by the timeout
-    never reaches the Stop hook and has no trace.
+  - OpenCode: the runner writes the trace itself, on the host, from the session exports (see
+    Runner, step 4), because `@mlflow/opencode` does not load in OpenCode 2. The trace has the
+    same shape as the plugin's (an `opencode_conversation` agent span with an `llm_call` span per
+    model call, carrying its token usage, and a `tool_<name>` span per tool call), with each
+    subagent session's spans nested under the tool call that started it. Because it is built from
+    the export rather than a Stop hook, a timed-out session still gets a trace of what it did.
+  - Neither harness's tracing can attach a trace to a given run, so after each step the runner
+    finds the session's traces by their `mlflow.trace.session` metadata, links them to the step
+    run (`link_traces_to_run`), and tags them `branch` and `step`. A Claude session killed by the
+    timeout never reaches the Stop hook and has no trace.
   - Traces are for inspection, not metrics: on the first step-1 run (2026-10-30) the
     `@mlflow/claude-code` 0.4.0 trace had every tool call (32 TOOL spans) but only 12 of the
     session's LLM calls, and about a third of the output tokens Claude Code reported.
 - Token/cost metrics come from the harness's own JSON output, so they are comparable even if
   tracing coverage differs between harnesses. `cost_usd` is **notional** for both harnesses: Claude
   runs on a subscription (the figure is Claude Code's API-equivalent estimate, not billed spend) and
-  OpenCode computes Lumen cost from the per-token prices in `opencode.json`.
+  OpenCode computes Lumen cost from the per-token prices in `opencode.json`. OpenCode reports
+  reasoning tokens apart from output tokens; `output_tokens` includes them, as Claude's does
+  (Lumen reported 0 reasoning tokens for every model on 2026-10-30, counting them as output).
+  OpenCode's session totals include its title-generation call.
 
 ## Review (`openweight review`)
 

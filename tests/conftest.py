@@ -21,6 +21,13 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
             item.add_marker(skip)
 
 
+@pytest.fixture(scope="session")
+def tracking_uri(tmp_path_factory: pytest.TempPathFactory) -> str:
+    """One local store for the whole session: fluent mlflow keeps exporting traces to the tracking
+    URI it first saw."""
+    return f"sqlite:///{tmp_path_factory.mktemp('mlflow') / 'mlflow.db'}"
+
+
 @pytest.fixture
 def repo(tmp_path: Path) -> Path:
     """A main repository with the benchmark inputs in place."""

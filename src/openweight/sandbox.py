@@ -194,14 +194,16 @@ class Sandbox:
         env_keys: Sequence[str] = (),
         interactive: bool = False,
         workdir: str = WORKSPACE_MOUNT,
+        stdin: bool = False,
     ) -> list[str]:
         """``docker exec`` arguments. Only the names of ``env_keys`` appear in the arguments: the
-        values are taken from docker's own environment, so secrets never show in ``ps``."""
+        values are taken from docker's own environment, so secrets never show in ``ps``. With
+        ``stdin`` the command reads what is piped to ``docker exec`` (without a terminal)."""
         args = ["exec", "--workdir", workdir]
-        if interactive:
+        if interactive or stdin:
             args.append("--interactive")
-            if os.isatty(0):
-                args.append("--tty")
+        if interactive and os.isatty(0):
+            args.append("--tty")
         for key in env_keys:
             args += ["--env", key]
         return [*args, self.agent, *command]
@@ -302,19 +304,23 @@ class Sandbox:
         timeout: float | None = None,
         workdir: str = WORKSPACE_MOUNT,
         stdout: IO[str] | None = None,
+        input: str | None = None,
     ) -> subprocess.CompletedProcess[str]:
         """Run ``command`` as the agent user and capture its output. Does not check the exit code.
 
         With ``timeout`` (seconds) the command runs under ``timeout`` inside the container, so it
         is the command that gets killed, not just ``docker exec``; it then exits `TIMEOUT_EXIT`.
         With ``stdout`` the command's output is written there as it arrives instead of captured.
+        ``input`` is written to the command's stdin.
         """
         self._require_up()
         env = dict(env or {})
         if timeout is not None:
             command = ["timeout", "--kill-after=10", f"{timeout:g}", *command]
+        args = self.exec_args(command, list(env), workdir=workdir, stdin=input is not None)
         return subprocess.run(
-            ["docker", *self.exec_args(command, list(env), workdir=workdir)],
+            ["docker", *args],
+            input=input,
             stdout=stdout or subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,

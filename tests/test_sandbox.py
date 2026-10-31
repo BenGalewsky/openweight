@@ -30,7 +30,8 @@ services:
 
 def test_versions_come_from_dockerfile() -> None:
     pins = sandbox.versions()
-    assert {"DOCKER_VERSION", "CLAUDE_VERSION", "OPENCODE_VERSION", "MLFLOW_VERSION"} <= set(pins)
+    pinned = {"DOCKER_VERSION", "CLAUDE_VERSION", "OPENCODE_VERSION", "MLFLOW_CLAUDE_CODE_VERSION"}
+    assert pinned <= set(pins)
     assert sandbox.image_tag() == (
         f"openweight-sandbox:claude-{pins['CLAUDE_VERSION']}-opencode-{pins['OPENCODE_VERSION']}"
     )
@@ -75,6 +76,20 @@ def test_exec_args_carry_env_names_only(tmp_path: Path) -> None:
         "exec", "--workdir", "/workspace", "--env", "CLAUDE_CODE_OAUTH_TOKEN",
         "ow-x-agent", "claude", "-p", "hi",
     ]  # fmt: skip
+
+
+def test_exec_args_stdin_without_tty(tmp_path: Path) -> None:
+    box = Sandbox("x", tmp_path, tmp_path)
+    args = box.exec_args(["opencode", "run"], stdin=True)
+    assert args == [
+        "exec",
+        "--workdir",
+        "/workspace",
+        "--interactive",
+        "ow-x-agent",
+        "opencode",
+        "run",
+    ]
 
 
 def test_up_requires_workspace(tmp_path: Path) -> None:
@@ -143,7 +158,6 @@ def test_agent_environment(live: tuple[Path, str, Sandbox]) -> None:
     assert agent_sh(box, "pwd") == "/workspace"
     assert pins["CLAUDE_VERSION"] in agent_sh(box, "claude --version")
     assert pins["OPENCODE_VERSION"] in agent_sh(box, "opencode --version")
-    assert pins["MLFLOW_VERSION"] in agent_sh(box, "mlflow --version")
     assert agent_sh(box, "uv run --no-project python --version").startswith("Python 3.13")
     agent_sh(box, "node --version && mdb-tables --version && psql --version && git --version")
     agent_sh(box, "docker compose version && docker buildx version")
@@ -181,6 +195,14 @@ def test_exec_streams_stdout_to_file(live: tuple[Path, str, Sandbox], tmp_path: 
     assert result.stdout is None
     assert result.stderr == "two\n"
     assert out.read_text() == "one\n"
+
+
+@pytest.mark.docker
+def test_exec_input(live: tuple[Path, str, Sandbox]) -> None:
+    _, _, box = live
+    box.up()
+    text = 'a "quoted"\nprompt\n'
+    assert box.exec(["cat"], input=text, timeout=10).stdout == text
 
 
 @pytest.mark.docker

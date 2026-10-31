@@ -17,7 +17,15 @@ from pathlib import Path
 
 from openweight import branches, sandbox, tracking
 from openweight.branches import Evaluation, StepRecord, Workspace
-from openweight.harnesses.base import FAILED, OK, RATE_LIMITED, TIMEOUT, Harness, StepResult
+from openweight.harnesses.base import (
+    FAILED,
+    OK,
+    RATE_LIMITED,
+    TIMEOUT,
+    Harness,
+    HarnessError,
+    StepResult,
+)
 from openweight.promptdb import PromptDB, Step
 from openweight.sandbox import Sandbox
 from openweight.tracking import Tracker
@@ -142,6 +150,8 @@ class Runner:
         if missing:
             raise RunnerError(f"{', '.join(missing)} not set (see .env.example)")
         credentials = {key: os.environ[key] for key in self.harness.credentials}
+        if not self.harness.traces_in_sandbox:
+            return credentials
         return credentials | tracking.harness_env()
 
     def run(self, steps: Sequence[int], reset: bool = False) -> list[StepOutcome]:
@@ -151,6 +161,10 @@ class Runner:
         MLflow runs marked superseded.
         """
         env = self.env()
+        try:
+            self.harness.check(self.evaluation)
+        except HarnessError as e:
+            raise RunnerError(str(e)) from None
         workspace = self.workspace
         next_step = workspace.next_step()
         if steps[0] > next_step:
@@ -301,11 +315,15 @@ class Runner:
                 f"step {step.number} — {step.title}: running {self.harness.name} "
                 f"(timeout {self.options.timeout_s / 60:g} min)"
             )
+            stdin = prompt if self.harness.prompt_on_stdin else None
             started = time.monotonic()
             with events.open("w") as out:
-                proc = self.box.exec(command, env=env, timeout=self.options.timeout_s, stdout=out)
+                proc = self.box.exec(
+                    command, env=env, timeout=self.options.timeout_s, stdout=out, input=stdin
+                )
             duration_s = time.monotonic() - started
             stderr.write_text(proc.stderr or "")
+            self.harness.finish(self.box, events)
             result = self.harness.parse(events, proc.returncode)
             if result.status != RATE_LIMITED or retries >= self.options.max_rate_limit_retries:
                 return Attempt(result, duration_s, retries, events, stderr)

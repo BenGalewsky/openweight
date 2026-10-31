@@ -145,8 +145,6 @@ def run(
         options = runner.Options(timeout_s=timeout * 60, on_failure=on_failure, retry_failed=retry)
     except ValueError as e:
         raise typer.BadParameter(str(e)) from None
-    except NotImplementedError as e:
-        raise _fail(e) from None
     repo = branches.repo_root(Path.cwd())
     db = promptdb.load(path, include_step_43)
     tracking.load_env(repo)

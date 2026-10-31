@@ -11,17 +11,12 @@ from mlflow import MlflowClient
 
 from openweight import promptdb
 from openweight.branches import Evaluation, git
-from openweight.harnesses.base import FAILED, OK, RATE_LIMITED, TIMEOUT, StepResult
+from openweight.harnesses.base import FAILED, OK, RATE_LIMITED, TIMEOUT, HarnessError, StepResult
 from openweight.runner import Options, Runner, RunnerError, select_steps
 from openweight.tracking import SESSION_METADATA, SUPERSEDED_TAG, Tracker
 
 PROMPTDB = Path(__file__).parents[1] / "PromptDB.md"
 EVALUATION = Evaluation("claude", "claude-sonnet-5-5", "high")
-
-
-@pytest.fixture(scope="module")
-def tracking_uri(tmp_path_factory: pytest.TempPathFactory) -> str:
-    return f"sqlite:///{tmp_path_factory.mktemp('mlflow') / 'mlflow.db'}"
 
 
 @pytest.fixture
@@ -41,13 +36,24 @@ class FakeHarness:
 
     name = "claude"
     credentials = ("FAKE_TOKEN",)
+    traces_in_sandbox = True
+    prompt_on_stdin = False
 
     def __init__(self) -> None:
         self.prompts: list[str] = []
+        self.finished: list[Path] = []
+        self.unavailable: str | None = None
+
+    def check(self, evaluation: Evaluation) -> None:
+        if self.unavailable:
+            raise HarnessError(self.unavailable)
 
     def command(self, prompt: str, evaluation: Evaluation, session_id: str) -> list[str]:
         self.prompts.append(prompt)
         return ["agent", session_id]
+
+    def finish(self, box: object, events: Path) -> None:
+        self.finished.append(events)
 
     def parse(self, events: Path, exit_code: int) -> StepResult:
         data = json.loads(events.read_text())
@@ -73,6 +79,7 @@ class FakeSandbox:
         self.statuses = list(statuses)
         self.uncommitted = set(uncommitted)
         self.calls: list[tuple[list[str], dict[str, str], float | None]] = []
+        self.inputs: list[str | None] = []
 
     def up(self) -> list[str]:
         return []
@@ -83,8 +90,10 @@ class FakeSandbox:
         env: dict[str, str] | None = None,
         timeout: float | None = None,
         stdout: IO[str] | None = None,
+        input: str | None = None,
     ) -> subprocess.CompletedProcess[str]:
         self.calls.append((list(command), dict(env or {}), timeout))
+        self.inputs.append(input)
         session_id = command[1]
         status = self.statuses.pop(0) if self.statuses else OK
         n = len(self.calls)
@@ -134,6 +143,7 @@ def test_run_logs_steps_to_mlflow(repo: Path, tracker: Tracker) -> None:
     assert workspace.next_step() == 3
     assert git(repo, "rev-parse", "refs/tags/eval/claude/claude-sonnet-5-5-high/step-02").strip()
     command, env, timeout = box.calls[0]
+    assert box.inputs == [None, None]  # the prompt is in the command
     assert env["FAKE_TOKEN"] == "secret"
     assert env["MLFLOW_EXPERIMENT_ID"] == tracker.experiment_id
     assert timeout == 3600
@@ -297,6 +307,28 @@ def test_rerun_needs_reset(repo: Path, tracker: Tracker) -> None:
     assert SUPERSEDED_TAG not in steps[2].data.tags
     assert runner.workspace.step_commits()[-1].run_id == steps[2].info.run_id
     assert len(runs(tracker, "branch")) == 1  # the parent run is reused
+
+
+def test_prompt_on_stdin_and_no_tracking_env(repo: Path, tracker: Tracker) -> None:
+    # Like OpenCode: the prompt goes in on stdin, and tracing happens on the host.
+    runner, box, _ = make_runner(repo, tracker)
+    runner.harness.prompt_on_stdin = True  # type: ignore[attr-defined]
+    runner.harness.traces_in_sandbox = False  # type: ignore[attr-defined]
+    runner.run([1])
+    [prompt] = runner.harness.prompts  # type: ignore[attr-defined]
+    assert box.inputs == [prompt]
+    _, env, _ = box.calls[0]
+    assert env == {"FAKE_TOKEN": "secret"}
+    assert runner.harness.finished == [runner.runs_dir / "step-01.jsonl"]  # type: ignore[attr-defined]
+
+
+def test_unavailable_model(repo: Path, tracker: Tracker) -> None:
+    runner, box, _ = make_runner(repo, tracker)
+    runner.harness.unavailable = "lumen does not serve glm-9"  # type: ignore[attr-defined]
+    with pytest.raises(RunnerError, match="does not serve glm-9"):
+        runner.run([1])
+    assert box.calls == []
+    assert runs(tracker, "branch") == []
 
 
 def test_missing_credentials(repo: Path, tracker: Tracker, monkeypatch: pytest.MonkeyPatch) -> None:

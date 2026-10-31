@@ -24,12 +24,12 @@
           "limit": { "context": 262138, "output": 256000 },
           "cost": { "input": 0.05, "output": 0.1 },
           "modalities": { "input": ["text"], "output": ["text"] },
-          "tool_call": true,
-          "reasoning": true
+          "tool_call": true
         }
       }
     }
   },
+  "permissions": [{ "action": "*", "resource": "*", "effect": "allow" }],
   "mcp": {
     "servers": {
       "svelte": { "type": "remote", "url": "https://mcp.svelte.dev/mcp" }

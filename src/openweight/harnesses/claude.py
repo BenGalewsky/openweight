@@ -12,7 +12,7 @@ from typing import Any
 
 from openweight.branches import Evaluation
 from openweight.harnesses.base import FAILED, OK, RATE_LIMITED, TIMEOUT, StepResult
-from openweight.sandbox import HARNESS_CONFIG_MOUNT, TIMEOUT_EXIT
+from openweight.sandbox import HARNESS_CONFIG_MOUNT, TIMEOUT_EXIT, Sandbox
 
 # Where the sandbox image's `npm install --global` puts the tracing plugin.
 MLFLOW_PLUGIN_DIR = "/usr/local/lib/node_modules/@mlflow/claude-code"
@@ -23,6 +23,11 @@ RATE_LIMIT_HTTP_STATUS = 429
 class ClaudeHarness:
     name = "claude"
     credentials = ("CLAUDE_CODE_OAUTH_TOKEN",)
+    traces_in_sandbox = True
+    prompt_on_stdin = False
+
+    def check(self, evaluation: Evaluation) -> None:
+        """Claude Code checks the model itself; a subscription has no model list to ask."""
 
     def command(self, prompt: str, evaluation: Evaluation, session_id: str) -> list[str]:
         effort = ["--effort", evaluation.effort] if evaluation.effort else []
@@ -39,6 +44,9 @@ class ClaudeHarness:
             "--plugin-dir", MLFLOW_PLUGIN_DIR,
             "--dangerously-skip-permissions",
         ]  # fmt: skip
+
+    def finish(self, box: Sandbox, events: Path) -> None:
+        """Nothing to do: the event stream has the totals and the plugin writes the trace."""
 
     def parse(self, events: Path, exit_code: int) -> StepResult:
         session_id = None
