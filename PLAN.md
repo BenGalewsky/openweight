@@ -49,7 +49,7 @@ main
 │   ├── tracking.py             # MLflow experiment/run/trace helpers
 │   └── review/
 │       ├── rubric.py           # scoring rubric + judge prompts
-│       └── judge.py            # frontier-model review -> MLflow assessments
+│       └── judge.py            # Claude and Codex judge sessions -> MLflow assessments
 ├── harness_config/
 │   ├── claude.settings.json    # enables MLflow tracing, turns off commit attribution
 │   ├── opencode.json           # Lumen provider, allow-all permissions, Svelte MCP, Dagster skills
@@ -465,7 +465,7 @@ the judge sees a change it can assess as a whole, and the cost is 7 judge sessio
 instead of 42.
 
 ```
-uv run openweight review --branch eval/claude/claude-sonnet-5-5-high [--phases 1-7] [--judge <model>]
+uv run openweight review --branch eval/claude/claude-sonnet-5-5-high [--phases 1-7] [--judge claude|codex]
 uv run openweight review --all            # every eval/* branch, for a leaderboard
 ```
 
@@ -494,10 +494,46 @@ uv run openweight review --all            # every eval/* branch, for a leaderboa
   **assessments/feedback**, with the judge model recorded as the source.
 - Rerunning a step with `--reset` tags the reviews of its phase and every later phase
   `openweight.superseded=true`, as it does the step runs, since the code they judged is gone.
-- With only a Claude subscription (no API key), the judge cannot be an `mlflow.genai` LLM judge that
-  calls the Anthropic API directly. Instead it runs as a headless `claude -p --effort high` session
-  in a sandbox with read-only tools and the code checked out at the phase's last tag, returns JSON
-  scores against the rubric, and the runner writes them with `mlflow.log_feedback`.
+- Two judges from different vendors review every phase, to offset self-preference bias (Claude
+  judging Claude); `--judge` limits a run to one. Each phase review gets one child run per judge,
+  and `report` shows both judges' scores and their mean. Neither can be an `mlflow.genai` LLM judge
+  calling an API directly, since there are only subscriptions (no API keys). Both run as headless
+  agents with read-only tools in the read-only copy at the phase's last tag, return JSON scores
+  against the rubric, and the runner writes them with `mlflow.log_feedback`:
+  - **Claude:** `claude -p --effort high`.
+  - **Codex:** `codex exec -s read-only -C <code> -m gpt-6.1-sol -c model_reasoning_effort=high
+    --output-schema <rubric schema> -o <result.json> --json`, on ChatGPT Plus. The schema must set
+    `additionalProperties: false` and list every property as required. `--json` events report
+    tokens but not the model or quota, so the runner reads those from the session file in
+    `~/.codex/sessions/` (`model`, and `rate_limits.primary` / `.secondary` `used_percent` for the
+    5-hour and weekly windows).
+- Tested on 2026-11-01 with phase 1 of `eval/opencode/lumen--glm-5.3` (steps 1–13), with the same
+  prompt and schema for both runs:
+
+  | | `gpt-6-luna` (free plan) | `gpt-6.1-sol` (Plus) |
+  |---|---|---|
+  | Time | 36 s | 1 min 48 s |
+  | Shell commands | 11 | 27 |
+  | Input tokens (cached) | ~450k (~400k) | ~400k (~290k) |
+  | Output tokens | 2.6k | 4.2k |
+  | Quota used | 1% of 30 days | 3% of 5 hours, ~0% of the week |
+  | Scores, in rubric order | 5/4/4/4/5/5 | 4/3/4/4/5/4 |
+  | Issues reported | 1 | 7 |
+
+  Sol read most source files in full and found six issues that check out in the code:
+  - The ESLint major version is 10, where step 1 asked for 9.
+  - `visits.by` and `reviewedBy` are plain text, where step 7 asked for foreign keys.
+  - A blank `typeId` becomes `0` and passes validation.
+  - The station form puts saved values back after a failed edit in place of values the user
+    cleared.
+  - Adding or editing a station needs JavaScript, although the commit message says it doesn't.
+  - The README's `cd ../web` runs from the repository root.
+
+  Sol also claimed the `db.ts` database path breaks after bundling. That is plausible but
+  unverified. It missed the nullability bug Luna found. **Use `gpt-6.1-sol`.** Its scores are
+  stricter and its rationales cite files and lines. Both models still skimmed the 170 KB diff
+  (Sol read its file list and first 160 lines). The judge prompt should have it work through the
+  diff file by file, or hand it the diff in pieces.
 - A final whole-branch review scores the end state (architecture, overall app quality) once all
   steps are done, after phase 7's review.
 - `openweight report` produces a comparison table (per pair: total cost, time, check pass rate,
@@ -534,10 +570,8 @@ To resolve before milestone 4.
    then the runner continues (see Runner, step 7).
 4. **MLflow server.** *Resolved:* the tracking server runs MLflow 3.17, which supports GenAI traces
    and assessments (≥ 3.4 needed); the client is pinned to `mlflow>=3.17.2` to match.
-5. **Judge model and cadence.** *Cadence resolved:* one review per phase, plus a final
-   whole-branch review (see Review). Still open: which frontier model is the reviewer, and should
-   we use two judges from different vendors to reduce self-preference bias, since Claude would be
-   judging Claude?
+5. **Judge model and cadence.** *Resolved:* one review per phase, plus a final whole-branch
+   review, each by two judges from different vendors: Claude Code and Codex (see Review).
 6. **Budget.** Per-step and per-run cost/time caps? 42 steps × several pairs adds up quickly.
 7. **Remote.** *Resolved:* branches stay local and are never pushed.
 8. **Step 43.** *Resolved:* excluded; evaluations run steps 1–42.
