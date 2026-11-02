@@ -54,18 +54,22 @@ Export = dict[str, Any]
 
 class OpenCodeHarness:
     name = "opencode"
-    # Every OpenCode model in the matrix is served by Lumen (see harness_config/opencode.json).
-    credentials = ("LUMEN_API_KEY",)
     traces_in_sandbox = False
     prompt_on_stdin = True
 
     def __init__(self, config: Path = CONFIG) -> None:
         self.config = config
 
+    def credentials(self, evaluation: Evaluation) -> tuple[str, ...]:
+        """The variables the provider's ``apiKey`` in ``opencode.json`` reads (``{env:NAME}``)."""
+        provider, _, _ = evaluation.session_model.partition("/")
+        options = self._options(provider)
+        return tuple(re.findall(r"\{env:(\w+)\}", options.get("apiKey", "")))
+
     def check(self, evaluation: Evaluation) -> None:
         """Fail unless the model's provider, as configured in ``opencode.json``, lists it."""
         base_url, api_key = self._provider(evaluation)
-        provider, _, model = evaluation.model.partition("/")
+        provider, _, model = evaluation.session_model.partition("/")
         served = served_models(base_url, api_key)
         if model not in served:
             raise HarnessError(
@@ -79,17 +83,23 @@ class OpenCodeHarness:
 
     def _provider(self, evaluation: Evaluation) -> tuple[str, str]:
         """The base URL and API key of the model's provider in ``opencode.json``."""
-        provider, _, model = evaluation.model.partition("/")
+        provider, _, model = evaluation.session_model.partition("/")
         if not model:
-            raise HarnessError(f"OpenCode models are provider/model ids, not {evaluation.model!r}")
+            raise HarnessError(
+                f"OpenCode models are provider/model ids, not {evaluation.session_model!r}"
+            )
+        options = self._options(provider)
+        return options["baseURL"], _resolve_env(options.get("apiKey", ""))
+
+    def _options(self, provider: str) -> dict[str, Any]:
+        """The provider's ``options`` in ``opencode.json``."""
         providers = json.loads(self.config.read_text()).get("provider", {})
         if provider not in providers:
             raise HarnessError(f"provider {provider!r} is not configured in {self.config.name}")
-        options = providers[provider].get("options", {})
-        return options["baseURL"], _resolve_env(options.get("apiKey", ""))
+        return providers[provider].get("options", {})
 
     def command(self, prompt: str, evaluation: Evaluation, session_id: str) -> list[str]:
-        model = evaluation.model + (f"#{evaluation.effort}" if evaluation.effort else "")
+        model = evaluation.session_model + (f"#{evaluation.effort}" if evaluation.effort else "")
         return [
             "env", f"OPENCODE_CONFIG={HARNESS_CONFIG_MOUNT}/opencode.json",
             # --standalone runs a private server rather than leaving a background service behind.

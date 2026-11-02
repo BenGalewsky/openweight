@@ -42,17 +42,26 @@ class WorkspaceError(RuntimeError):
 
 @dataclass(frozen=True)
 class Evaluation:
-    """One (harness, model, effort) pair and the names derived from it."""
+    """One (harness, model, effort) pair and the names derived from it.
+
+    ``substitute_model``, if set, is the model the sessions run with instead of ``model``, which
+    still names the branch: it lets a branch whose provider became unavailable be finished with a
+    stand-in (GLM-5.3's steps from 18 on run on OpenRouter's GLM-5.3-Flash since Lumen's budget
+    ran out).
+    """
 
     harness: str
     model: str
     effort: str | None = None
+    substitute_model: str | None = None
 
     def __post_init__(self) -> None:
         if self.harness not in HARNESSES:
             raise ValueError(f"unknown harness {self.harness!r} (expected one of {HARNESSES})")
         if not self.model:
             raise ValueError("model must not be empty")
+        if self.substitute_model == "":
+            raise ValueError("substitute model must not be empty")
 
     @property
     def slug(self) -> str:
@@ -72,8 +81,13 @@ class Evaluation:
         return f"{self.harness}--{self.slug}"
 
     @property
+    def session_model(self) -> str:
+        """The model the sessions run with."""
+        return self.substitute_model or self.model
+
+    @property
     def assisted_by(self) -> str:
-        return f"{self.harness}:{self.model}"
+        return f"{self.harness}:{self.session_model}"
 
     def tag(self, step: int) -> str:
         return f"{self.branch}/step-{step:02d}"

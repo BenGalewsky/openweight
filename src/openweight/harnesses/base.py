@@ -52,13 +52,16 @@ class StepResult:
 
 class Harness(Protocol):
     name: str
-    # Environment variables holding this harness's model credentials, passed into the sandbox.
-    credentials: tuple[str, ...]
     # Whether the harness writes its traces from inside the sandbox, which then needs the MLFLOW_*
     # variables. Harnesses that do not get no MLflow credentials there.
     traces_in_sandbox: bool
     # Whether `command` reads the prompt from stdin instead of taking it as an argument.
     prompt_on_stdin: bool
+
+    def credentials(self, evaluation: Evaluation) -> tuple[str, ...]:
+        """The environment variables holding the session model's credentials, passed into the
+        sandbox."""
+        ...
 
     def check(self, evaluation: Evaluation) -> None:
         """Raise `HarnessError` if the evaluation cannot run, e.g. its model is not served."""

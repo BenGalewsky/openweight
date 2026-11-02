@@ -22,9 +22,11 @@ RATE_LIMIT_HTTP_STATUS = 429
 
 class ClaudeHarness:
     name = "claude"
-    credentials = ("CLAUDE_CODE_OAUTH_TOKEN",)
     traces_in_sandbox = True
     prompt_on_stdin = False
+
+    def credentials(self, evaluation: Evaluation) -> tuple[str, ...]:
+        return ("CLAUDE_CODE_OAUTH_TOKEN",)
 
     def check(self, evaluation: Evaluation) -> None:
         """Claude Code checks the model itself; a subscription has no model list to ask."""
@@ -37,7 +39,7 @@ class ClaudeHarness:
         effort = ["--effort", evaluation.effort] if evaluation.effort else []
         return [
             "claude", "--print", prompt,
-            "--model", evaluation.model,
+            "--model", evaluation.session_model,
             *effort,
             "--output-format", "stream-json", "--verbose",
             "--session-id", session_id,

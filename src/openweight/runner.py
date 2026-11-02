@@ -169,10 +169,12 @@ class Runner:
         return self._workspace
 
     def env(self) -> dict[str, str]:
-        missing = [key for key in self.harness.credentials if not os.environ.get(key)]
+        missing = [
+            key for key in self.harness.credentials(self.evaluation) if not os.environ.get(key)
+        ]
         if missing:
             raise RunnerError(f"{', '.join(missing)} not set (see .env.example)")
-        credentials = {key: os.environ[key] for key in self.harness.credentials}
+        credentials = {key: os.environ[key] for key in self.harness.credentials(self.evaluation)}
         if not self.harness.traces_in_sandbox:
             return credentials
         return credentials | tracking.harness_env()
@@ -231,7 +233,7 @@ class Runner:
         for action in self.box.up():
             self.log(action)
 
-        prompt = self.db.build_prompt(step, self.evaluation.harness, self.evaluation.model)
+        prompt = self.db.build_prompt(step, self.evaluation.harness, self.evaluation.session_model)
         run_id = self.tracker.start_step(
             parent, self.evaluation, step, self.db.sha256, self.options.timeout_s
         )

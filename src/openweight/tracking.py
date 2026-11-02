@@ -111,6 +111,7 @@ class Tracker:
                 "branch": evaluation.branch,
                 "harness": evaluation.harness,
                 "model": evaluation.model,
+                "session_model": evaluation.session_model,
                 "promptdb_sha": promptdb_sha,
             },
         )
@@ -121,6 +122,7 @@ class Tracker:
             "phase_title": step.phase_title,
             "harness": evaluation.harness,
             "model": evaluation.model,
+            "session_model": evaluation.session_model,
             "effort": evaluation.effort or "",
             "timeout_s": timeout_s,
         }

@@ -179,12 +179,19 @@ def run(
     reset: Annotated[
         bool, typer.Option("--reset", help="Discard steps that already ran and rerun them.")
     ] = False,
+    substitute_model: Annotated[
+        str | None,
+        typer.Option(
+            help="Run the sessions with this model instead of --model, which still names the "
+            "branch (to finish a branch whose provider became unavailable)."
+        ),
+    ] = None,
     path: PromptDBPath = Path("PromptDB.md"),
     include_step_43: IncludeStep43 = False,
 ) -> None:
     """Run benchmark steps for one (harness, model, effort) pair, one session per step."""
     try:
-        evaluation = branches.Evaluation(harness, model, effort)
+        evaluation = branches.Evaluation(harness, model, effort, substitute_model)
         driver = harnesses.get(harness)
         options = runner.Options(
             timeout_s=timeout * 60, on_failure=on_failure, retry_failed=retry,

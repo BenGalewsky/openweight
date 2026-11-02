@@ -97,6 +97,13 @@ workspaces/                     # gitignored: one standalone git repo per eval b
   come back about 24 hours later, up to 100 coins. GLM spends about $5 a step, so a run outlasts
   the budget (see Runner, step 3).
 - Ornith runs on 1.0 for the duration of the project.
+- **GLM's steps from 18 on run on a stand-in.** After Lumen's budget stopped GLM-5.3 at step 18
+  (2026-11-01), the branch was reset to step 17, and steps 18–20 ran on OpenRouter's
+  `z-ai/glm-5.3-flash` (`--substitute-model openrouter/z-ai/glm-5.3-flash`, 2026-11-02). The
+  branch keeps its `lumen--glm-5.3` name; those steps' runs record the model they ran with as
+  `session_model`, and their commits say so in `Assisted-by`. Flash is a smaller model than
+  GLM-5.3, so phase scores from step 18 on are not GLM-5.3's. The `openrouter` provider in
+  `opencode.json` reads its key from `OPEN_ROUTER_KEY`; OpenRouter reports no coin budget.
 - At startup the runner checks each OpenCode model id against the provider's model list
   (`<baseURL>/models`, with the provider's settings from `opencode.json`) and refuses to start an
   evaluation for a model that isn't served. Claude Code models have no such list on a subscription;
@@ -339,6 +346,10 @@ For each step:
      tagging the step run `status=error`, rather than record a step that never ran; `--steps
      next` resumes it. (Before this, GLM's step 18 used up its reruns overnight and was recorded
      as an empty `rate_limited` step that passed every check.)
+   - `--substitute-model` runs the sessions with another model while the branch keeps the name
+     `--model` gives it, to finish a branch whose provider became unavailable. The step runs
+     record it as `session_model` (tag and param), the prompt's `Assisted-by` names it, and the
+     harness takes its credentials from that model's provider.
    - `--steps` takes `next` (default), `N`, or `N-M`, and must start at the branch's next step.
      `--reset` reruns earlier steps: it resets the branch to the tag before the first one and tags
      the discarded steps' MLflow runs `openweight.superseded=true`.

@@ -141,6 +141,21 @@ def test_command_takes_the_prompt_on_stdin() -> None:
     assert "--auto" in command
 
 
+def test_command_runs_the_substitute_model() -> None:
+    evaluation = Evaluation("opencode", "lumen/glm-5.3", None, "openrouter/z-ai/glm-5.3-flash")
+    command = OpenCodeHarness().command("x", evaluation, "")
+    assert command[command.index("--model") + 1] == "openrouter/z-ai/glm-5.3-flash"
+    assert evaluation.branch == "eval/opencode/lumen--glm-5.3"
+    assert evaluation.assisted_by == "opencode:openrouter/z-ai/glm-5.3-flash"
+
+
+def test_credentials_are_the_providers_api_key_variables(config: Path) -> None:
+    harness = OpenCodeHarness(config)
+    assert harness.credentials(Evaluation("opencode", "lumen/glm-5.3")) == ("LUMEN_API_KEY",)
+    substitute = Evaluation("opencode", "lumen/glm-5.3", None, "openrouter/z-ai/glm-5.3-flash")
+    assert harness.credentials(substitute) == ("OPEN_ROUTER_KEY",)
+
+
 def test_command_effort_is_the_model_variant() -> None:
     command = OpenCodeHarness().command("x", Evaluation("opencode", "lumen/glm-5.3", "high"), "")
     assert command[command.index("--model") + 1] == "lumen/glm-5.3#high"
@@ -329,7 +344,9 @@ def test_finish_without_a_session(tmp_path: Path) -> None:
 def config(tmp_path: Path) -> Path:
     path = tmp_path / "opencode.json"
     options = {"baseURL": "https://lumen.example/v1", "apiKey": "{env:LUMEN_API_KEY}"}
-    path.write_text(json.dumps({"provider": {"lumen": {"options": options}}}))
+    openrouter = {"baseURL": "https://openrouter.example/v1", "apiKey": "{env:OPEN_ROUTER_KEY}"}
+    providers = {"lumen": {"options": options}, "openrouter": {"options": openrouter}}
+    path.write_text(json.dumps({"provider": providers}))
     return path
 
 

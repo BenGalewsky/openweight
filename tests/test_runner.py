@@ -36,7 +36,6 @@ class FakeHarness:
     """Reads back the outcome the fake sandbox wrote as its 'event stream'."""
 
     name = "claude"
-    credentials = ("FAKE_TOKEN",)
     traces_in_sandbox = True
     prompt_on_stdin = False
 
@@ -46,6 +45,9 @@ class FakeHarness:
         self.unavailable: str | None = None
         # Successive answers to `budget`, the last one repeated; none means no budget.
         self.budgets = list(budgets)
+
+    def credentials(self, evaluation: Evaluation) -> tuple[str, ...]:
+        return ("FAKE_TOKEN",)
 
     def check(self, evaluation: Evaluation) -> None:
         if self.unavailable:

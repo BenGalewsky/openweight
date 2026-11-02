@@ -28,6 +28,19 @@
           "tool_call": true
         }
       }
+    },
+    "openrouter": {
+      "options": {
+        "baseURL": "https://openrouter.ai/api/v1",
+        "apiKey": "{env:OPEN_ROUTER_KEY}"
+      },
+      "models": {
+        "z-ai/glm-5.3-flash": {
+          "name": "GLM-5.3-Flash via OpenRouter",
+          "limit": { "context": 1048576, "output": 131072 },
+          "cost": { "input": 0.0285, "output": 0.0923, "cache_read": 0.0285 }
+        }
+      }
     }
   },
   "permissions": [{ "action": "*", "resource": "*", "effect": "allow" }],
