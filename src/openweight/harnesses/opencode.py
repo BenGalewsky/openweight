@@ -64,6 +64,21 @@ class OpenCodeHarness:
 
     def check(self, evaluation: Evaluation) -> None:
         """Fail unless the model's provider, as configured in ``opencode.json``, lists it."""
+        base_url, api_key = self._provider(evaluation)
+        provider, _, model = evaluation.model.partition("/")
+        served = served_models(base_url, api_key)
+        if model not in served:
+            raise HarnessError(
+                f"{provider} does not serve {model} (it serves {', '.join(sorted(served))})"
+            )
+
+    def budget(self, evaluation: Evaluation) -> float | None:
+        """The ``coins_available`` the provider reports at ``<baseURL>/usage`` (Lumen does), or
+        None if it reports none or cannot be reached."""
+        return available_budget(*self._provider(evaluation))
+
+    def _provider(self, evaluation: Evaluation) -> tuple[str, str]:
+        """The base URL and API key of the model's provider in ``opencode.json``."""
         provider, _, model = evaluation.model.partition("/")
         if not model:
             raise HarnessError(f"OpenCode models are provider/model ids, not {evaluation.model!r}")
@@ -71,11 +86,7 @@ class OpenCodeHarness:
         if provider not in providers:
             raise HarnessError(f"provider {provider!r} is not configured in {self.config.name}")
         options = providers[provider].get("options", {})
-        served = served_models(options["baseURL"], _resolve_env(options.get("apiKey", "")))
-        if model not in served:
-            raise HarnessError(
-                f"{provider} does not serve {model} (it serves {', '.join(sorted(served))})"
-            )
+        return options["baseURL"], _resolve_env(options.get("apiKey", ""))
 
     def command(self, prompt: str, evaluation: Evaluation, session_id: str) -> list[str]:
         model = evaluation.model + (f"#{evaluation.effort}" if evaluation.effort else "")
@@ -169,6 +180,22 @@ def served_models(base_url: str, api_key: str) -> set[str]:
     except (requests.RequestException, ValueError) as e:
         raise HarnessError(f"cannot list the models at {url}: {e}") from None
     return {model["id"] for model in data.get("data", [])}
+
+
+def available_budget(base_url: str, api_key: str) -> float | None:
+    """``coins_available`` from ``<base_url>/usage``, Lumen's spend budget, or None if the
+    endpoint is missing, unreachable, or does not report it."""
+    url = base_url.rstrip("/") + "/usage"
+    try:
+        response = requests.get(
+            url, headers={"Authorization": f"Bearer {api_key}"}, timeout=MODELS_TIMEOUT_S
+        )
+        response.raise_for_status()
+        coins = response.json().get("coins_available")
+    except (requests.RequestException, ValueError, AttributeError) as e:
+        logger.warning("cannot read the budget at %s: %s", url, e)
+        return None
+    return float(coins) if isinstance(coins, int | float) else None
 
 
 def export_sessions(box: Sandbox, session_id: str) -> list[Export]:

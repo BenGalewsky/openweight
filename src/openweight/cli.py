@@ -169,6 +169,13 @@ def run(
         bool, typer.Option("--checks/--no-checks", help="Run the objective checks after each step.")
     ] = True,
     docker_build: DockerBuild = False,
+    min_budget: Annotated[
+        float,
+        typer.Option(
+            help="Wait before each session until the provider's spend budget, if it reports one "
+            "(Lumen's coins), is at least this."
+        ),
+    ] = runner.Options.min_budget,
     reset: Annotated[
         bool, typer.Option("--reset", help="Discard steps that already ran and rerun them.")
     ] = False,
@@ -179,7 +186,10 @@ def run(
     try:
         evaluation = branches.Evaluation(harness, model, effort)
         driver = harnesses.get(harness)
-        options = runner.Options(timeout_s=timeout * 60, on_failure=on_failure, retry_failed=retry)
+        options = runner.Options(
+            timeout_s=timeout * 60, on_failure=on_failure, retry_failed=retry,
+            min_budget=min_budget,
+        )  # fmt: skip
     except ValueError as e:
         raise typer.BadParameter(str(e)) from None
     repo = branches.repo_root(Path.cwd())

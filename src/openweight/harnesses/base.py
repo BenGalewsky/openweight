@@ -64,6 +64,11 @@ class Harness(Protocol):
         """Raise `HarnessError` if the evaluation cannot run, e.g. its model is not served."""
         ...
 
+    def budget(self, evaluation: Evaluation) -> float | None:
+        """What is left of the provider's spend budget, in its own units, or None if the
+        provider reports no budget (a subscription's usage limits are not one)."""
+        ...
+
     def command(self, prompt: str, evaluation: Evaluation, session_id: str) -> list[str]:
         """The command that runs one non-interactive session in ``/workspace``, writing its JSON
         event stream to stdout. Harnesses that cannot choose a session id ignore ``session_id``

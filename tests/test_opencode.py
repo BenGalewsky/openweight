@@ -365,6 +365,35 @@ def test_check_unreachable_provider(config: Path, monkeypatch: pytest.MonkeyPatc
         OpenCodeHarness(config).check(Evaluation("opencode", "lumen/glm-5.3"))
 
 
+def test_budget_reads_coins_available(config: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    answers = [{"coins_available": 42.5, "cost": 160.1}, {"cost": 1.0}]
+    calls = []
+
+    def get(url: str, headers: dict[str, str], timeout: float) -> requests.Response:
+        calls.append(url)
+        response = requests.Response()
+        response.status_code = 200
+        response._content = json.dumps(answers.pop(0)).encode()
+        return response
+
+    monkeypatch.setattr(opencode.requests, "get", get)
+    harness = OpenCodeHarness(config)
+    assert harness.budget(Evaluation("opencode", "lumen/glm-5.3")) == 42.5
+    assert calls == ["https://lumen.example/v1/usage"]
+    # A provider that reports no budget has none.
+    assert harness.budget(Evaluation("opencode", "lumen/glm-5.3")) is None
+
+
+def test_budget_of_an_unreachable_provider_is_unknown(
+    config: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def get(url: str, headers: dict[str, str], timeout: float) -> requests.Response:
+        raise requests.ConnectionError("no route")
+
+    monkeypatch.setattr(opencode.requests, "get", get)
+    assert OpenCodeHarness(config).budget(Evaluation("opencode", "lumen/glm-5.3")) is None
+
+
 def test_config_file() -> None:
     config = json.loads((ROOT / "harness_config" / "opencode.json").read_text())
     assert config["permissions"] == [{"action": "*", "resource": "*", "effect": "allow"}]
@@ -375,3 +404,6 @@ def test_config_file() -> None:
         if entry["harness"] == "opencode":
             provider, _, model = entry["model"].partition("/")
             assert model in config["provider"][provider]["models"]
+    # Lumen bills cached input at the full input price.
+    for model in config["provider"]["lumen"]["models"].values():
+        assert model["cost"]["cache_read"] == model["cost"]["input"]

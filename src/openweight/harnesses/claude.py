@@ -29,6 +29,10 @@ class ClaudeHarness:
     def check(self, evaluation: Evaluation) -> None:
         """Claude Code checks the model itself; a subscription has no model list to ask."""
 
+    def budget(self, evaluation: Evaluation) -> float | None:
+        """None: a subscription has usage limits, which Claude Code reports when it hits one."""
+        return None
+
     def command(self, prompt: str, evaluation: Evaluation, session_id: str) -> list[str]:
         effort = ["--effort", evaluation.effort] if evaluation.effort else []
         return [

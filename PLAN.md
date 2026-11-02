@@ -86,6 +86,16 @@ workspaces/                     # gitignored: one standalone git repo per eval b
   list says they are. Without it OpenCode sends an image the agent reads to the model, and Lumen
   rejects the whole request: GLM's first step-2 session (2026-10-31) died reading screenshots it
   had downloaded. Qwen3.8-flash accepts images on Lumen and is left undeclared.
+- Each model's `cost` gives `cache_read` the input price. Lumen bills cached input at the full
+  input price, and without the key OpenCode counted it as free: GLM's steps 1–17 (2026-10-31)
+  logged $4.07 where Lumen charged about $102, since cached input is nearly all of an agent's
+  tokens. The logged OpenCode costs were recomputed from their token metrics on 2026-11-01
+  (tagged `openweight.cost_recomputed`).
+- The Lumen key has a spend budget in coins (about a dollar each at these prices), reported as
+  `coins_available` by `<baseURL>/usage`. When it runs out every request fails with HTTP 429
+  `insufficient_quota` ("Coin budget exhausted"). It refills gradually: what was spent seems to
+  come back about 24 hours later, up to 100 coins. GLM spends about $5 a step, so a run outlasts
+  the budget (see Runner, step 3).
 - Ornith runs on 1.0 for the duration of the project.
 - At startup the runner checks each OpenCode model id against the provider's model list
   (`<baseURL>/models`, with the provider's settings from `opencode.json`) and refuses to start an
@@ -310,13 +320,25 @@ For each step:
    - Fresh session per step (the previous steps' context lives in the code and git history,
      as it would for a human developer picking up the next ticket).
    - Wall-clock timeout per step (default 60 min). No dollar cap: Claude runs on a subscription
-     and Lumen spend is notional.
+     and Lumen's own budget caps OpenCode.
    - Both Claude evaluations share one subscription's usage limits, so `--parallel` never runs
      more than one Claude evaluation at a time (OpenCode evaluations can run alongside). If a Claude
      step hits a usage limit, the runner resets the workspace to the previous step's tag, waits for
      the limit to reset, and reruns the step, recording `rate_limited_retries`. The limit is
      detected from Claude Code's `rate_limit_event` (status `rejected`, with its `resetsAt`) or an
      HTTP 429 in the result; without a reset time the runner waits 15 minutes.
+   - For a provider that reports a spend budget (Lumen, through the harness's `budget`), the
+     runner waits before every session until at least `--min-budget` (default 25) is left,
+     polling every 10 minutes, so a session does not start only to run out partway. A session
+     stopped by an exhausted budget (OpenCode reports Lumen's 429 but not its `Retry-After`) is
+     discarded and rerun like a usage-limit stop, after waiting for the budget rather than a
+     fixed time.
+   - A discarded session's tokens and cost still count towards the step (`discarded_cost_usd`
+     says how much was thrown away). If the limit outlasts 20 reruns, or the budget stays low for
+     26 hours, the runner resets the workspace to the previous step's tag and stops the run,
+     tagging the step run `status=error`, rather than record a step that never ran; `--steps
+     next` resumes it. (Before this, GLM's step 18 used up its reruns overnight and was recorded
+     as an empty `rate_limited` step that passed every check.)
    - `--steps` takes `next` (default), `N`, or `N-M`, and must start at the branch's next step.
      `--reset` reruns earlier steps: it resets the branch to the tag before the first one and tags
      the discarded steps' MLflow runs `openweight.superseded=true`.
@@ -424,7 +446,8 @@ runner did not author) with a conventional-commit subject (`commits_conventional
 - **Child run** per step (`step-NN`, tag `openweight.role=step`): params `step`, `title`, `phase`;
   metrics `duration_s`, `cost_usd`, `input_tokens`, `output_tokens`, `cache_read_tokens`,
   `cache_write_tokens`, `num_turns`, `tool_calls`, `agent_commits`, `agent_committed`,
-  `rate_limited_retries`, `retried`, `traces`, check results, commit conventions, diff stats
+  `rate_limited_retries`, `discarded_cost_usd`, `retried`, `traces`, check results, commit
+  conventions, diff stats
   (`files_changed`, `lines_added`, `lines_removed`); tags `status`, `harness_status`,
   `session_id`, `commit`, `error`; artifacts: `prompt.md`, the event stream, harness stderr, check
   logs, `diff.patch` (`step-(N-1)..step-N`). `input_tokens`
@@ -451,7 +474,8 @@ runner did not author) with a conventional-commit subject (`commits_conventional
 - Token/cost metrics come from the harness's own JSON output, so they are comparable even if
   tracing coverage differs between harnesses. `cost_usd` is **notional** for both harnesses: Claude
   runs on a subscription (the figure is Claude Code's API-equivalent estimate, not billed spend) and
-  OpenCode computes Lumen cost from the per-token prices in `opencode.json`. OpenCode reports
+  OpenCode computes Lumen cost from the per-token prices in `opencode.json`, which match what
+  Lumen bills against the key's budget, cached input included. OpenCode reports
   reasoning tokens apart from output tokens; `output_tokens` includes them, as Claude's does
   (Lumen reported 0 reasoning tokens for every model on 2026-10-30, counting them as output).
   OpenCode's session totals include its title-generation call.
@@ -572,6 +596,7 @@ To resolve before milestone 4.
    and assessments (≥ 3.4 needed); the client is pinned to `mlflow>=3.17.2` to match.
 5. **Judge model and cadence.** *Resolved:* one review per phase, plus a final whole-branch
    review, each by two judges from different vendors: Claude Code and Codex (see Review).
-6. **Budget.** Per-step and per-run cost/time caps? 42 steps × several pairs adds up quickly.
+6. **Budget.** *Partly resolved:* Lumen's coin budget caps OpenCode spend, and the runner waits
+   for it (see Runner, step 3). Claude runs on a subscription. Still open: per-run time caps.
 7. **Remote.** *Resolved:* branches stay local and are never pushed.
 8. **Step 43.** *Resolved:* excluded; evaluations run steps 1–42.

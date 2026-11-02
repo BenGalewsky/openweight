@@ -7,6 +7,11 @@ repository, and logs everything to a child run of the branch's MLflow run, with 
 traces linked to it. The objective checks run in the sandbox on the work the session left. A
 session that fails or times out, or whose work fails a check that passed after the previous step,
 gets one retry: a fresh session that starts from the work the first one left, told what went wrong.
+
+Before every session the runner waits until the provider's spend budget, for providers that report
+one, is above a minimum. A session stopped by a usage limit or an exhausted budget is discarded and
+rerun from the same starting point; its tokens and cost still count towards the step. If the limit
+outlasts the reruns, the runner resets the step and stops rather than record a step that never ran.
 """
 
 import os
@@ -15,6 +20,7 @@ import uuid
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import NoReturn
 
 from openweight import branches, checks, sandbox, tracking
 from openweight.branches import Evaluation, StepRecord, Workspace
@@ -53,6 +59,11 @@ class Options:
     # How long to wait after hitting a usage limit when the harness does not say when it resets.
     rate_limit_wait_s: float = 15 * 60
     max_rate_limit_retries: int = 20
+    # Don't start a session while the provider's spend budget (if it reports one) is below this,
+    # polling every budget_poll_s, and stop the run after max_budget_wait_s without enough.
+    min_budget: float = 25
+    budget_poll_s: float = 10 * 60
+    max_budget_wait_s: float = 26 * 60 * 60
     trace_wait_s: float = 60
     # Give a failed or timed-out step, or one that broke a check, one more session.
     retry_failed: bool = True
@@ -76,6 +87,8 @@ class StepOutcome:
     trace_ids: list[str] = field(default_factory=list)
     retried: bool = False
     checks: list[CheckResult] = field(default_factory=list)
+    # Of every session the step ran, discarded ones included.
+    cost_usd: float | None = None
 
 
 @dataclass(frozen=True)
@@ -87,6 +100,8 @@ class Attempt:
     rate_limited_retries: int
     events: Path
     stderr: Path
+    # The sessions a usage limit stopped, whose work was discarded before rerunning.
+    discarded: list[StepResult] = field(default_factory=list)
 
 
 def retry_prompt(prompt: str, reason: str) -> str:
@@ -293,9 +308,12 @@ class Runner:
         duration_s = sum(attempt.duration_s for attempt in attempts)
         rate_limited_retries = sum(attempt.rate_limited_retries for attempt in attempts)
         metrics: dict[str, float] = {}
-        for attempt in attempts:
-            for key, value in attempt.result.metrics().items():
+        for session in (s for a in attempts for s in [*a.discarded, a.result]):
+            for key, value in session.metrics().items():
                 metrics[key] = metrics.get(key, 0) + value
+        discarded = [session for attempt in attempts for session in attempt.discarded]
+        if discarded:
+            metrics["discarded_cost_usd"] = sum(s.cost_usd or 0 for s in discarded)
         metrics |= workspace.diff_stats(step.number)
         metrics |= checks.metrics(checked)
         metrics |= checks.commit_metrics(
@@ -328,7 +346,7 @@ class Runner:
 
         outcome = StepOutcome(
             step.number, run_id, status, result, record, duration_s, rate_limited_retries,
-            trace_ids, retried=len(attempts) > 1, checks=checked,
+            trace_ids, retried=len(attempts) > 1, checks=checked, cost_usd=metrics.get("cost_usd"),
         )  # fmt: skip
         self.log(_summary(outcome))
         return outcome
@@ -341,7 +359,9 @@ class Runner:
         events = self.runs_dir / f"{name}.jsonl"
         stderr = self.runs_dir / f"{name}.stderr.log"
         retries = 0
+        discarded: list[StepResult] = []
         while True:
+            self._wait_for_budget(step)
             session_id = str(uuid.uuid4())
             command = self.harness.command(prompt, self.evaluation, session_id)
             self.log(
@@ -358,9 +378,22 @@ class Runner:
             stderr.write_text(proc.stderr or "")
             self.harness.finish(self.box, events)
             result = self.harness.parse(events, proc.returncode)
-            if result.status != RATE_LIMITED or retries >= self.options.max_rate_limit_retries:
-                return Attempt(result, duration_s, retries, events, stderr)
+            if result.status != RATE_LIMITED:
+                return Attempt(result, duration_s, retries, events, stderr, discarded)
+            discarded.append(result)
+            if retries >= self.options.max_rate_limit_retries:
+                reason = f"still at the usage limit after {retries} reruns ({result.error})"
+                self._stop(step, reason)
             retries += 1
+            restore()
+            budget = self.harness.budget(self.evaluation)
+            if budget is not None and budget < self.options.min_budget:
+                # Out of budget rather than rate-limited: wait for it, not for a fixed time.
+                self.log(
+                    f"step {step.number}: budget exhausted ({budget:g} left); resetting and "
+                    f"retrying when it is back (retry {retries})"
+                )
+                continue
             wait_s = self.options.rate_limit_wait_s
             if result.rate_limit_resets_at is not None:
                 wait_s = max(result.rate_limit_resets_at - time.time(), 0) + RATE_LIMIT_MARGIN_S
@@ -368,8 +401,39 @@ class Runner:
                 f"step {step.number}: usage limit reached; resetting and retrying in "
                 f"{wait_s / 60:.0f} min (retry {retries})"
             )
-            restore()
             self.sleep(wait_s)
+
+    def _wait_for_budget(self, step: Step) -> None:
+        """Wait until the provider's spend budget, if it reports one, is at least
+        ``min_budget``, so a session does not start only to run out partway."""
+        waited = 0.0
+        while (budget := self.harness.budget(self.evaluation)) is not None:
+            if budget >= self.options.min_budget:
+                if waited:
+                    self.log(f"step {step.number}: budget is back ({budget:g}); continuing")
+                return
+            if waited >= self.options.max_budget_wait_s:
+                self._stop(
+                    step,
+                    f"the budget stayed below {self.options.min_budget:g} for "
+                    f"{waited / 3600:.1f} h ({budget:g} left)",
+                )
+            if not waited:
+                self.log(
+                    f"step {step.number}: budget is {budget:g}, below "
+                    f"{self.options.min_budget:g}; waiting for it to refill"
+                )
+            self.sleep(self.options.budget_poll_s)
+            waited += self.options.budget_poll_s
+
+    def _stop(self, step: Step, reason: str) -> NoReturn:
+        """Reset the workspace to the previous step's tag and stop the run, so the step is rerun
+        from the start by ``--steps next`` rather than recorded unfinished."""
+        self.workspace.reset_to(step.number - 1)
+        raise RunnerError(
+            f"step {step.number}: {reason}; stopped with the workspace reset to "
+            f"{self.evaluation.tag(step.number - 1)} (resume with --steps next)"
+        )
 
     def _previous_checks(self, step: int) -> dict[str, float]:
         """The metrics of the previous step's run, whose ``check.*`` values say which checks
@@ -405,8 +469,8 @@ def _summary(outcome: StepOutcome) -> str:
     parts = [f"step {outcome.step}: {outcome.status} in {minutes}m{seconds:02d}s"]
     if outcome.retried:
         parts[0] += " after a retry"
-    if result.cost_usd is not None:
-        parts.append(f"${result.cost_usd:.2f} (notional)")
+    if outcome.cost_usd is not None:
+        parts.append(f"${outcome.cost_usd:.2f} (notional)")
     parts.append(f"{outcome.record.agent_commits} agent commit(s)")
     parts.append(f"{len(outcome.trace_ids)} trace(s)")
     ran = [check for check in outcome.checks if check.ran]

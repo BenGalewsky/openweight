@@ -40,14 +40,21 @@ class FakeHarness:
     traces_in_sandbox = True
     prompt_on_stdin = False
 
-    def __init__(self) -> None:
+    def __init__(self, budgets: Sequence[float] = ()) -> None:
         self.prompts: list[str] = []
         self.finished: list[Path] = []
         self.unavailable: str | None = None
+        # Successive answers to `budget`, the last one repeated; none means no budget.
+        self.budgets = list(budgets)
 
     def check(self, evaluation: Evaluation) -> None:
         if self.unavailable:
             raise HarnessError(self.unavailable)
+
+    def budget(self, evaluation: Evaluation) -> float | None:
+        if not self.budgets:
+            return None
+        return self.budgets.pop(0) if len(self.budgets) > 1 else self.budgets[0]
 
     def command(self, prompt: str, evaluation: Evaluation, session_id: str) -> list[str]:
         self.prompts.append(prompt)
@@ -132,12 +139,13 @@ def make_runner(
     uncommitted: Sequence[int] = (),
     check_list: Sequence[Check] = (),
     check_exits: Sequence[int] = (),
+    budgets: Sequence[float] = (),
     **options: object,
 ) -> tuple[Runner, FakeSandbox, list[float]]:
     sleeps: list[float] = []
     db = promptdb.load(PROMPTDB)
     runner = Runner(
-        repo, EVALUATION, db, FakeHarness(), None, tracker,  # type: ignore[arg-type]
+        repo, EVALUATION, db, FakeHarness(budgets), None, tracker,  # type: ignore[arg-type]
         Options(trace_wait_s=5, **options), log=lambda _: None, sleep=sleeps.append,
         check_list=check_list,
     )  # fmt: skip
@@ -293,12 +301,18 @@ def test_retry_can_be_turned_off(repo: Path, tracker: Tracker) -> None:
     assert len(box.calls) == 1
 
 
-def test_exhausted_usage_limit_is_not_retried(repo: Path, tracker: Tracker) -> None:
+def test_exhausted_usage_limit_stops_the_run(repo: Path, tracker: Tracker) -> None:
     runner, box, _ = make_runner(repo, tracker, [RATE_LIMITED], max_rate_limit_retries=0)
-    [outcome] = runner.run([1])
-    assert outcome.result.status == RATE_LIMITED
-    assert not outcome.retried
+    with pytest.raises(RunnerError, match="step 1: still at the usage limit after 0 reruns"):
+        runner.run([1, 2])
     assert len(box.calls) == 1
+    # Nothing is recorded: the step's work is discarded, so --steps next reruns it.
+    workspace = runner.workspace
+    assert workspace.next_step() == 1
+    assert workspace.is_clean()
+    assert workspace.head() == workspace.tag_sha(0)
+    [step] = runs(tracker, "step")
+    assert step.data.tags["status"] == "error"
 
 
 def test_rate_limited_step_is_reset_and_retried(repo: Path, tracker: Tracker) -> None:
@@ -314,6 +328,45 @@ def test_rate_limited_step_is_reset_and_retried(repo: Path, tracker: Tracker) ->
     assert outcome.record.agent_commits == 1
     [step] = runs(tracker, "step")
     assert step.data.metrics["rate_limited_retries"] == 1
+    # The discarded session's cost counts towards the step.
+    assert step.data.metrics["cost_usd"] == 3.0
+    assert step.data.metrics["discarded_cost_usd"] == 1.5
+    assert outcome.cost_usd == 3.0
+
+
+def test_session_waits_for_the_budget(repo: Path, tracker: Tracker) -> None:
+    runner, box, sleeps = make_runner(
+        repo, tracker, budgets=[10, 10, 30], min_budget=25, budget_poll_s=600
+    )
+    [outcome] = runner.run([1])
+    assert outcome.status == OK
+    assert sleeps == [600, 600]
+    assert len(box.calls) == 1
+
+
+def test_exhausted_budget_waits_for_the_budget_not_a_fixed_time(
+    repo: Path, tracker: Tracker
+) -> None:
+    # Enough to start, none left after the session, then back after one poll.
+    runner, box, sleeps = make_runner(
+        repo, tracker, [RATE_LIMITED, OK], budgets=[30, 0, 0, 30],
+        min_budget=25, budget_poll_s=600, rate_limit_wait_s=900,
+    )  # fmt: skip
+    [outcome] = runner.run([1])
+    assert outcome.status == OK
+    assert outcome.rate_limited_retries == 1
+    assert sleeps == [600]
+    assert len(box.calls) == 2
+
+
+def test_budget_that_never_refills_stops_the_run(repo: Path, tracker: Tracker) -> None:
+    runner, box, sleeps = make_runner(
+        repo, tracker, budgets=[0], min_budget=25, budget_poll_s=600, max_budget_wait_s=1200
+    )
+    with pytest.raises(RunnerError, match="step 1: the budget stayed below 25 for 0.3 h"):
+        runner.run([1])
+    assert sleeps == [600, 600]
+    assert box.calls == []
 
 
 def test_rerun_needs_reset(repo: Path, tracker: Tracker) -> None:

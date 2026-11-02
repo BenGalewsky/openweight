@@ -12,18 +12,18 @@
         "glm-5.3": {
           "name": "glm-5.3 via Lumen",
           "limit": { "context": 524282, "output": 131072 },
-          "cost": { "input": 1.321413, "output": 4.248318 },
+          "cost": { "input": 1.321413, "output": 4.248318, "cache_read": 1.321413 },
           "modalities": { "input": ["text"], "output": ["text"] }
         },
         "qwen3.8-flash": {
           "name": "qwen3.8-flash via Lumen",
           "limit": { "context": 262138, "output": 131072 },
-          "cost": { "input": 0.142798, "output": 0.452902 }
+          "cost": { "input": 0.142798, "output": 0.452902, "cache_read": 0.142798 }
         },
         "ornith-1.0-35b": {
           "name": "ornith-1.0-35b via Lumen",
           "limit": { "context": 262138, "output": 256000 },
-          "cost": { "input": 0.05, "output": 0.1 },
+          "cost": { "input": 0.05, "output": 0.1, "cache_read": 0.05 },
           "modalities": { "input": ["text"], "output": ["text"] },
           "tool_call": true
         }
