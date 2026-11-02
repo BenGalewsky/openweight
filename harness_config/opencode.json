@@ -39,6 +39,11 @@
           "name": "GLM-5.3-Flash via OpenRouter",
           "limit": { "context": 1048576, "output": 131072 },
           "cost": { "input": 0.0285, "output": 0.0923, "cache_read": 0.0285 }
+        },
+        "qwen/qwen3.8-max-0902": {
+          "name": "Qwen3.8 Max 0902 via OpenRouter",
+          "limit": { "context": 1000000, "output": 131072 },
+          "cost": { "input": 2, "output": 6, "cache_read": 0.25 }
         }
       }
     }

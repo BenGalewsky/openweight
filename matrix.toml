@@ -16,6 +16,10 @@ model = "claude-haiku-5-5"
 effort = "high"
 
 [[eval]]
+harness = "claude"
+model = "openrouter/qwen/qwen3.8-max-0902"
+
+[[eval]]
 harness = "opencode"
 model = "lumen/glm-5.3"
 
@@ -26,3 +30,7 @@ model = "lumen/qwen3.8-flash"
 [[eval]]
 harness = "opencode"
 model = "lumen/ornith-1.0-35b"
+
+[[eval]]
+harness = "opencode"
+model = "openrouter/qwen/qwen3.8-max-0902"
