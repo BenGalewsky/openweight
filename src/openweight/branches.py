@@ -90,7 +90,12 @@ class Evaluation:
         return f"{self.harness}:{self.session_model}"
 
     def tag(self, step: int) -> str:
-        return f"{self.branch}/step-{step:02d}"
+        return step_tag(self.branch, step)
+
+
+def step_tag(branch: str, step: int) -> str:
+    """The tag of ``step`` on ``branch``, e.g. ``eval/claude/claude-opus-5-5-high/step-01``."""
+    return f"{branch}/step-{step:02d}"
 
 
 @dataclass(frozen=True)
@@ -141,6 +146,15 @@ def git(cwd: Path, *args: str) -> str:
     result = run_git(cwd, *args)
     if result.returncode != 0:
         raise GitError(f"git {' '.join(args)} failed in {cwd}:\n{result.stderr.strip()}")
+    return result.stdout
+
+
+def run_git_bytes(cwd: Path, *args: str) -> bytes:
+    """Run git in ``cwd`` and return its raw stdout, raising `GitError` on failure."""
+    result = subprocess.run(["git", "-C", str(cwd), *args], capture_output=True, check=False)
+    if result.returncode != 0:
+        stderr = result.stderr.decode(errors="replace").strip()
+        raise GitError(f"git {' '.join(args)} failed in {cwd}:\n{stderr}")
     return result.stdout
 
 

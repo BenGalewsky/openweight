@@ -47,9 +47,11 @@ main
 │   ├── runner.py               # step loop: sandbox exec, step commits, MLflow logging
 │   ├── checks.py               # objective checks run after each step
 │   ├── tracking.py             # MLflow experiment/run/trace helpers
+│   ├── report.py               # `openweight report`: per-branch and per-phase comparison
 │   └── review/
-│       ├── rubric.py           # scoring rubric + judge prompts
-│       └── judge.py            # Claude and Codex judge sessions -> MLflow assessments
+│       ├── rubric.py           # scoring rubric, judge prompt, answer schema
+│       ├── judge.py            # Codex judge sessions -> traces and MLflow assessments
+│       └── reviewer.py         # per-phase judge inputs, review runs
 ├── harness_config/
 │   ├── claude.settings.json    # enables MLflow tracing, turns off commit attribution
 │   ├── opencode.json           # Lumen provider, allow-all permissions, Svelte MCP, Dagster skills
@@ -500,21 +502,42 @@ the judge sees a change it can assess as a whole, and the cost is 7 judge sessio
 instead of 42.
 
 ```
-uv run openweight review --branch eval/claude/claude-sonnet-5-5-high [--phases 1-7] [--judge claude|codex]
+uv run openweight review --branch eval/claude/claude-sonnet-5-5-high [--phases 1-7] [--judge codex]
 uv run openweight review --all            # every eval/* branch, for a leaderboard
 ```
 
-- `--phases` defaults to every complete phase not yet reviewed; a phase whose last step has not
-  run is refused.
-- Input per phase: the phase's step prompts, the diff from the tag of the step before the phase to
-  the tag of its last step (e.g. `step-13..step-16` for phase 2), each step's check results, and
-  read access to the code at the phase's last tag (the judge runs as an agent with read-only tools
-  so it can inspect files beyond the diff). The code comes from a read-only copy built from the
-  main repository's tags, never from the live workspace.
-- The judge also gets the agent's commit messages in the phase, which the Process criterion
-  scores. It is **blind**: harness/model names are stripped from what it sees, and so are the
-  `Assisted-by` and `Eval-*` trailers (whether the agent wrote `Assisted-by` is already measured
-  by `commits_assisted_by`).
+- `--phases` defaults to every complete phase without a current review (a finished review, under
+  this PromptDB revision, of the commit the phase's last tag points at now); a phase whose last
+  step has not run is refused. A phase named with `--phases` is reviewed again, and its earlier
+  review tagged `openweight.superseded=true`.
+- Input per phase: the phase's step prompts (with the conventions, `<harness>:<model>` left
+  unfilled), the diff from the tag of the step before the phase to the tag of its last step (e.g.
+  `step-13..step-16` for phase 2), each step's check results, and read access to the code at the
+  phase's last tag (the judge runs as an agent with read-only tools so it can inspect files
+  beyond the diff). The code is exported with `git archive` from the main repository's tag (never
+  the live workspace), without `.git`, its files read-only.
+- The diff is handed over **split by file** (`diff/<path>.diff`, with `changes.txt` listing each
+  file's lines added and removed; lock files and binary files have none, and a file's diff is cut
+  off at 200 KB), and the prompt has the judge go through it file by file, since both trial judges
+  skimmed a single 170 KB diff (see below).
+- The judge also gets the commit messages of each step, which the Process criterion scores; a
+  commit the runner made for leftover changes is marked as the framework's. It is **blind**: the
+  `Assisted-by`, `Co-authored-by` and `Eval-*` trailers are stripped from the commit messages
+  (whether the agent wrote `Assisted-by` is already measured by `commits_assisted_by`), and the
+  branch's model ids (its `model` and every step's `session_model`, with and without the provider
+  prefix) are replaced with `<model>` in every input file. The prompt says the trailers were
+  removed: in the first live review (phase 2 of GLM, 2026-11-02) Sol docked Process for every
+  commit "omitting" the `Assisted-by` trailer the conventions ask for (5 once told). Harness
+  names (Claude Code, OpenCode) are replaced with `<agent>` in the commit messages; the exported
+  code is left as the agent wrote it. The inputs and code are built in a temporary directory
+  outside the main repository, so the judge does not start out in its git history (which names
+  every branch); a copy of the inputs and the judge's logs is kept in
+  `runs/<branch>/review/phase-N.<judge>/`.
+- **Known gap:** Codex's `read-only` sandbox stops writes, not reads. A judge that went looking
+  could still read the main repository, `runs/`, or earlier Codex sessions on the host and learn
+  which branch it is judging. Closing it needs a filesystem boundary (e.g. running the judge in a
+  container that sees only the snapshot and its inputs, with its own Codex home). Nothing in the
+  prompt points it there, and its commands are in the trace for checking.
 - Rubric (each 1–5 with a written rationale), applied to the phase as a whole:
   - **Completeness** — every requirement in the phase's step prompts is implemented.
   - **Correctness** — the code would work; no obvious bugs; checks pass.
@@ -524,13 +547,21 @@ uv run openweight review --all            # every eval/* branch, for a leaderboa
   - **Process** — commit messages, tests added where asked.
 - Each phase review is a child run of the branch's parent run (`phase-N-review`, tags
   `openweight.role=review`, `phase`, `first_step`, `last_step`, `commit` of the last step's tag,
-  `judge`), with the scores as metrics (`review.<criterion>`) and the rationales as an artifact.
-  The judge session's trace is linked to it and carries the scores as MLflow
-  **assessments/feedback**, with the judge model recorded as the source.
+  `judge`, `judge_model`, `session_id`), with the scores as metrics (`review.<criterion>` and
+  `review.mean`), the judge's usage as `judge_duration_s`, `judge_input_tokens`,
+  `judge_output_tokens`, `judge_cache_read_tokens`, `judge_commands`, `judge_quota_5h_pct` and
+  `judge_quota_week_pct`, and as artifacts `review.json`, the rationales and top issues as
+  `rationales.md`, the prompt, and the judge's inputs and logs under `judge/`. The judge session's
+  trace (written by the reviewer from Codex's session file: a `codex_review` agent span with a
+  `tool_shell` span per command) is linked to it and carries the scores as MLflow
+  **assessments/feedback**, with the judge model recorded as the source. A judge session that
+  fails, or answers off the rubric, leaves its run `FAILED` and stops the review.
 - Rerunning a step with `--reset` tags the reviews of its phase and every later phase
   `openweight.superseded=true`, as it does the step runs, since the code they judged is gone.
-- Two judges from different vendors review every phase, to offset self-preference bias (Claude
-  judging Claude); `--judge` limits a run to one. Each phase review gets one child run per judge,
+- Two judges from different vendors are to review every phase, to offset self-preference bias
+  (Claude judging Claude); `--judge` limits a run to one. **Only Codex is implemented so far**;
+  the Claude judge plugs into the same `Judge` protocol (`run` a read-only session, write its
+  trace). Each phase review gets one child run per judge,
   and `report` shows both judges' scores and their mean. Neither can be an `mlflow.genai` LLM judge
   calling an API directly, since there are only subscriptions (no API keys). Both run as headless
   agents with read-only tools in the read-only copy at the phase's last tag, return JSON scores
@@ -571,9 +602,12 @@ uv run openweight review --all            # every eval/* branch, for a leaderboa
   diff file by file, or hand it the diff in pieces.
 - A final whole-branch review scores the end state (architecture, overall app quality) once all
   steps are done, after phase 7's review.
-- `openweight report` produces a comparison table (per pair: total cost, time, check pass rate,
-  mean review scores, per-phase breakdown) from MLflow. Step metrics (cost, time, checks) roll up
-  into the same phases, so each phase's review sits next to what it cost.
+- `openweight report [--branch ...] [-o report.md]` produces Markdown comparison tables from
+  MLflow: per branch, the steps run and failed, total notional cost, time, check pass rate, and
+  each criterion's score averaged over the judges and then the reviewed phases; then per branch
+  and phase the same step figures next to each judge's mean score. Steps are the ones the branch
+  has now (found by their `Eval-Run-Id` trailers), and reviews only current ones (as for
+  `--phases`).
 
 ## Implementation milestones
 
@@ -592,7 +626,8 @@ uv run openweight review --all            # every eval/* branch, for a leaderboa
    failure policy (already in place for harness errors and timeouts) to failed checks.
 7. **Full run** — one complete 42-step run per harness with a baseline model; fix runner
    robustness issues (timeouts, failed steps, resume).
-8. **Review** — per-phase judge, rubric, MLflow assessments, `report` command.
+8. **Review** — per-phase judge, rubric, MLflow assessments, `report` command. *Done with the
+   Codex judge*; the Claude judge and the final whole-branch review remain.
 9. **Matrix** — `matrix.toml` with the five pairs above; `openweight run --matrix [--parallel N]`.
 
 ## Open questions

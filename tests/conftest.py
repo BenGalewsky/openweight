@@ -1,9 +1,12 @@
+import uuid
 from pathlib import Path
 
 import pytest
+from mlflow import MlflowClient
 
 from openweight import branches
 from openweight.branches import git
+from openweight.tracking import Tracker
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:
@@ -26,6 +29,18 @@ def tracking_uri(tmp_path_factory: pytest.TempPathFactory) -> str:
     """One local store for the whole session: fluent mlflow keeps exporting traces to the tracking
     URI it first saw."""
     return f"sqlite:///{tmp_path_factory.mktemp('mlflow') / 'mlflow.db'}"
+
+
+@pytest.fixture
+def tracker(tracking_uri: str, monkeypatch: pytest.MonkeyPatch) -> Tracker:
+    """A tracker on a fresh experiment in a local store; fluent mlflow logs traces there too."""
+    client = MlflowClient(tracking_uri)
+    experiment_id = client.create_experiment(f"test-{uuid.uuid4().hex[:8]}")
+    monkeypatch.setenv("MLFLOW_TRACKING_URI", tracking_uri)
+    monkeypatch.setenv("MLFLOW_EXPERIMENT_ID", experiment_id)
+    monkeypatch.setenv("FAKE_TOKEN", "secret")
+    monkeypatch.setenv("MLFLOW_ENABLE_ASYNC_TRACE_LOGGING", "false")
+    return Tracker(experiment_id, client)
 
 
 @pytest.fixture

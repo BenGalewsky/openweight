@@ -183,7 +183,7 @@ class Runner:
         """Run ``steps`` (consecutive, starting at the branch's next step) in order.
 
         With ``reset``, steps that already ran from ``steps[0]`` on are discarded first and their
-        MLflow runs marked superseded.
+        MLflow runs marked superseded, as are the reviews of their phases and every later phase.
         """
         env = self.env()
         try:
@@ -226,6 +226,7 @@ class Runner:
         workspace.reset_to(step - 1)
         branches.sync_to_main(self.repo, workspace)
         self.tracker.supersede(superseded)
+        self.tracker.supersede_reviews(workspace.branch, self.db.step(step).phase)
 
     def run_step(self, step: Step, parent: str, env: dict[str, str]) -> StepOutcome:
         workspace = self.workspace

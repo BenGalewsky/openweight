@@ -1,4 +1,5 @@
-"""MLflow tracking: a parent run per eval branch, a child run per step, traces linked by session.
+"""MLflow tracking: a parent run per eval branch, a child run per step and per phase review,
+traces linked by session.
 
 Everything goes to the existing experiment ``MLFLOW_EXPERIMENT_ID``; this module never creates
 experiments. Configuration comes from the environment, which `load_env` fills from ``.env``.
@@ -11,7 +12,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 from mlflow import MlflowClient
-from mlflow.entities import Metric, Param
+from mlflow.entities import Metric, Param, Run
 from mlflow.exceptions import MlflowException
 from mlflow.utils.mlflow_tags import MLFLOW_PARENT_RUN_ID
 
@@ -29,6 +30,7 @@ ROLE_TAG = "openweight.role"
 SUPERSEDED_TAG = "openweight.superseded"
 SESSION_METADATA = "mlflow.trace.session"
 TRACE_POLL_S = 2.0
+SEARCH_PAGE = 1000
 
 
 class TrackingError(RuntimeError):
@@ -78,21 +80,26 @@ class Tracker:
             "harness_version": harness_version,
             "promptdb_sha": promptdb_sha,
         }
+        found = self.find_branch_run(evaluation.branch, promptdb_sha)
+        if found is None:
+            return self.client.create_run(
+                self.experiment_id, run_name=evaluation.branch, tags=tags
+            ).info.run_id
+        run_id = found.info.run_id
+        self.client.update_run(run_id, status="RUNNING")
+        self.set_tags(run_id, tags)
+        return run_id
+
+    def find_branch_run(self, branch: str, promptdb_sha: str) -> Run | None:
+        """The branch's latest parent run for this PromptDB revision, if there is one."""
         found = self.client.search_runs(
             [self.experiment_id],
-            f"tags.`{ROLE_TAG}` = 'branch' and tags.branch = '{evaluation.branch}'"
+            f"tags.`{ROLE_TAG}` = 'branch' and tags.branch = '{branch}'"
             f" and tags.promptdb_sha = '{promptdb_sha}'",
             max_results=1,
             order_by=["attributes.start_time DESC"],
         )
-        if not found:
-            return self.client.create_run(
-                self.experiment_id, run_name=evaluation.branch, tags=tags
-            ).info.run_id
-        run_id = found[0].info.run_id
-        self.client.update_run(run_id, status="RUNNING")
-        self.set_tags(run_id, tags)
-        return run_id
+        return found[0] if found else None
 
     def start_step(
         self,
@@ -131,6 +138,70 @@ class Tracker:
         )
         return run.info.run_id
 
+    def start_review(
+        self, parent: Run, phase: int, steps: tuple[int, int], commit: str, judge: str,
+        judge_model: str,
+    ) -> str:  # fmt: skip
+        """A child run of the branch's parent run for one judge's review of ``phase``, which
+        covers ``steps`` (first, last) and ends at ``commit``."""
+        inherited = ("branch", "harness", "model", "effort", "promptdb_sha")
+        tags = {key: parent.data.tags.get(key, "") for key in inherited} | {
+            MLFLOW_PARENT_RUN_ID: parent.info.run_id,
+            ROLE_TAG: "review",
+            "phase": str(phase),
+            "first_step": str(steps[0]),
+            "last_step": str(steps[1]),
+            "commit": commit,
+            "judge": judge,
+            "judge_model": judge_model,
+        }
+        run = self.client.create_run(
+            self.experiment_id, run_name=f"phase-{phase}-review", tags=tags
+        )
+        params = {
+            "phase": phase, "first_step": steps[0], "last_step": steps[1], "judge": judge,
+            "judge_model": judge_model,
+        }  # fmt: skip
+        self.client.log_batch(
+            run.info.run_id, params=[Param(key, str(value)) for key, value in params.items()]
+        )
+        return run.info.run_id
+
+    def search(self, filter_string: str) -> list[Run]:
+        """Every run in the experiment matching ``filter_string``, newest first."""
+        runs: list[Run] = []
+        token = None
+        while True:
+            page = self.client.search_runs(
+                [self.experiment_id], filter_string, max_results=SEARCH_PAGE,
+                order_by=["attributes.start_time DESC"], page_token=token,
+            )  # fmt: skip
+            runs += page
+            token = page.token
+            if not token:
+                return runs
+
+    def step_runs(self, branch: str) -> dict[str, Run]:
+        """The branch's step runs, by run id."""
+        runs = self.search(f"tags.`{ROLE_TAG}` = 'step' and tags.branch = '{branch}'")
+        return {run.info.run_id: run for run in runs}
+
+    def reviews(self, branch: str) -> list[Run]:
+        """The branch's phase reviews that are not superseded, newest first."""
+        runs = self.search(f"tags.`{ROLE_TAG}` = 'review' and tags.branch = '{branch}'")
+        return [run for run in runs if run.data.tags.get(SUPERSEDED_TAG) != "true"]
+
+    def supersede_reviews(self, branch: str, from_phase: int) -> list[str]:
+        """Mark the reviews of ``from_phase`` and every later phase superseded, since the code
+        they judged was discarded by a reset. Returns their run ids."""
+        superseded = [
+            run.info.run_id
+            for run in self.reviews(branch)
+            if int(run.data.tags.get("phase", "0")) >= from_phase
+        ]
+        self.supersede(superseded)
+        return superseded
+
     def log_metrics(self, run_id: str, metrics: Mapping[str, float]) -> None:
         now = int(time.time() * 1000)
         self.client.log_batch(
@@ -161,7 +232,7 @@ class Tracker:
         self.client.set_terminated(run_id, status)
 
     def supersede(self, run_ids: list[str]) -> None:
-        """Mark step runs whose commits were discarded by a reset."""
+        """Mark runs whose commits were discarded by a reset."""
         for run_id in run_ids:
             self.client.set_tag(run_id, SUPERSEDED_TAG, "true")
 
@@ -184,9 +255,13 @@ class Tracker:
                 break
             time.sleep(TRACE_POLL_S)
         trace_ids = [trace.info.trace_id for trace in traces]
+        self.link_trace_ids(run_id, trace_ids, tags)
+        return trace_ids
+
+    def link_trace_ids(self, run_id: str, trace_ids: list[str], tags: Mapping[str, str]) -> None:
+        """Link the traces to the run and tag them."""
         if trace_ids:
             self.client.link_traces_to_run(trace_ids, run_id)
         for trace_id in trace_ids:
             for key, value in tags.items():
                 self.client.set_trace_tag(trace_id, key, value)
-        return trace_ids

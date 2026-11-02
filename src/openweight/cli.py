@@ -5,7 +5,19 @@ from typing import Annotated
 
 import typer
 
-from openweight import branches, checks, harnesses, promptdb, runner, sandbox, serve, tracking
+from openweight import (
+    branches,
+    checks,
+    harnesses,
+    promptdb,
+    report,
+    runner,
+    sandbox,
+    serve,
+    tracking,
+)
+from openweight.review import judge as judges
+from openweight.review import reviewer
 
 app = typer.Typer(no_args_is_help=True, help="Evaluate coding harnesses and models on PromptDB.")
 prompts_app = typer.Typer(no_args_is_help=True, help="Inspect the parsed benchmark prompts.")
@@ -273,6 +285,94 @@ def check(
     typer.echo(f"logs in {log_dir.relative_to(repo)}")
     if any(result.status == checks.FAILED for result in results):
         raise typer.Exit(1)
+
+
+def _eval_branches(repo: Path, names: list[str] | None, all_branches: bool) -> list[str]:
+    known = branches.eval_branches(repo)
+    if all_branches or not names:
+        if not all_branches:
+            raise typer.BadParameter("give --branch or --all", param_hint="--branch")
+        return known
+    unknown = [name for name in names if name not in known]
+    if unknown:
+        raise typer.BadParameter(f"no eval branch {', '.join(unknown)}", param_hint="--branch")
+    return names
+
+
+BranchesOption = Annotated[
+    list[str] | None,
+    typer.Option("--branch", help="Eval branch, e.g. eval/opencode/lumen--glm-5.3 (repeatable)."),
+]
+AllBranches = Annotated[bool, typer.Option("--all", help="Every eval/* branch.")]
+
+
+@app.command("review")
+def review(
+    branch: BranchesOption = None,
+    all_branches: AllBranches = False,
+    phases: Annotated[
+        str | None,
+        typer.Option(
+            help="Phase N or N-M to review (again). Default: every complete phase not reviewed yet."
+        ),
+    ] = None,
+    judge: Annotated[
+        list[str] | None,
+        typer.Option(help=f"Judge to review with (repeatable): {', '.join(judges.JUDGES)}."),
+    ] = None,
+    judge_model: Annotated[
+        str | None, typer.Option(help=f"Model for the judge (default {judges.CODEX_MODEL}).")
+    ] = None,
+    timeout: Annotated[float, typer.Option(help="Wall-clock limit per review, in minutes.")] = 30,
+    path: PromptDBPath = Path("PromptDB.md"),
+) -> None:
+    """Have the judges score each complete phase of the eval branches against the rubric.
+
+    Each review is logged to MLflow as a child run of the branch's run, with the scores as
+    metrics and as assessments on the judge's trace.
+    """
+    repo = branches.repo_root(Path.cwd())
+    names = _eval_branches(repo, branch, all_branches)
+    try:
+        judge_list = [judges.get(name, judge_model) for name in judge or judges.JUDGES]
+    except ValueError as e:
+        raise typer.BadParameter(str(e), param_hint="--judge") from None
+    db = promptdb.load(path)
+    tracking.load_env(repo)
+    try:
+        tracker = tracking.Tracker.from_env()
+        job = reviewer.Reviewer(repo, db, tracker, judge_list, timeout * 60, log=typer.echo)
+        for name in names:
+            job.review(name, phases)
+    except ValueError as e:
+        raise typer.BadParameter(str(e), param_hint="--phases") from None
+    except (tracking.TrackingError, reviewer.ReviewError, branches.GitError) as e:
+        raise _fail(e) from None
+
+
+@app.command("report")
+def report_command(
+    branch: BranchesOption = None,
+    output: Annotated[
+        Path | None, typer.Option("--output", "-o", help="Write the Markdown report here.")
+    ] = None,
+    path: PromptDBPath = Path("PromptDB.md"),
+) -> None:
+    """Compare the eval branches: cost, time, checks and review scores, overall and by phase."""
+    repo = branches.repo_root(Path.cwd())
+    names = _eval_branches(repo, branch, all_branches=not branch)
+    db = promptdb.load(path)
+    tracking.load_env(repo)
+    try:
+        tracker = tracking.Tracker.from_env()
+        text = report.render([report.collect(repo, db, tracker, name) for name in names])
+    except (tracking.TrackingError, branches.GitError) as e:
+        raise _fail(e) from None
+    if output:
+        output.write_text(text)
+        typer.echo(f"wrote {output}")
+    else:
+        typer.echo(text, nl=False)
 
 
 @sandbox_app.command("build")

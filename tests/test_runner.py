@@ -1,13 +1,11 @@
 import json
 import subprocess
-import uuid
 from collections.abc import Sequence
 from pathlib import Path
 from typing import IO
 
 import mlflow
 import pytest
-from mlflow import MlflowClient
 
 from openweight import promptdb
 from openweight.branches import Evaluation, git
@@ -18,18 +16,6 @@ from openweight.tracking import SESSION_METADATA, SUPERSEDED_TAG, Tracker
 
 PROMPTDB = Path(__file__).parents[1] / "PromptDB.md"
 EVALUATION = Evaluation("claude", "claude-sonnet-5-5", "high")
-
-
-@pytest.fixture
-def tracker(tracking_uri: str, monkeypatch: pytest.MonkeyPatch) -> Tracker:
-    """A tracker on a fresh experiment in a local store; fluent mlflow logs traces there too."""
-    client = MlflowClient(tracking_uri)
-    experiment_id = client.create_experiment(f"test-{uuid.uuid4().hex[:8]}")
-    monkeypatch.setenv("MLFLOW_TRACKING_URI", tracking_uri)
-    monkeypatch.setenv("MLFLOW_EXPERIMENT_ID", experiment_id)
-    monkeypatch.setenv("FAKE_TOKEN", "secret")
-    monkeypatch.setenv("MLFLOW_ENABLE_ASYNC_TRACE_LOGGING", "false")
-    return Tracker(experiment_id, client)
 
 
 class FakeHarness:
@@ -379,7 +365,11 @@ def test_rerun_needs_reset(repo: Path, tracker: Tracker) -> None:
     with pytest.raises(RunnerError, match="next step .* is 3, not 4"):
         runner.run([4])
 
+    [parent] = runs(tracker, "branch")
+    review = tracker.start_review(parent, 1, (1, 13), "abc", "codex", "gpt-test")
     runner.run([2], reset=True)
+    # The reset step's phase was reviewed on code that is gone.
+    assert tracker.client.get_run(review).data.tags[SUPERSEDED_TAG] == "true"
     steps = runs(tracker, "step")
     assert [r.info.run_name for r in steps] == ["step-01", "step-02", "step-02"]
     assert steps[1].data.tags.get(SUPERSEDED_TAG) == "true"

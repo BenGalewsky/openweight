@@ -23,7 +23,8 @@ db/IDOT.accdb
 db/Wetlands_IDOT_BE.accdb
 ```
 
-Requires on the host: `git`, `uv`, and Docker (OrbStack or Docker Desktop). Agents and checks run
+Requires on the host: `git`, `uv`, Docker (OrbStack or Docker Desktop), and for reviews the `codex` CLI signed in
+to ChatGPT (`codex login`). Agents and checks run
 in a per-evaluation sandbox container that carries everything else (Node, mdbtools, the `claude`
 and `opencode` CLIs). The models under test are listed in [matrix.toml](matrix.toml).
 
@@ -51,6 +52,11 @@ uv run openweight serve eval/claude/claude-sonnet-5-5-high -p 4173 -- \
   sh -c 'cd web && npm run build && npm run preview -- --host 0.0.0.0'
 uv run openweight sandbox forward eval/claude/claude-sonnet-5-5-high 3000 # forward a running server
 uv run openweight sandbox forward eval/claude/claude-sonnet-5-5-high --stop
+uv run openweight review --branch eval/opencode/lumen--glm-5.3   # each complete phase not yet reviewed
+uv run openweight review --branch eval/opencode/lumen--glm-5.3 --phases 2   # review phase 2 again
+uv run openweight review --all              # every eval branch
+uv run openweight report                    # compare the branches (Markdown)
+uv run openweight report -o report.md
 uv run pytest                               # framework tests
 uv run pytest --docker                      # also start real sandbox containers
 ```
@@ -70,7 +76,7 @@ since the forwarder reaches the sandbox over its network rather than its loopbac
 ## Status
 
 Milestones 1 (skeleton and PromptDB parsing), 2 (eval branches and workspaces), 3 (sandbox), 4
-(Claude harness), 5 (OpenCode harness), and 6 (objective checks) are done. `workspace open` creates the orphan eval branch
+(Claude harness), 5 (OpenCode harness), 6 (objective checks), and 8 (review) are done. `workspace open` creates the orphan eval branch
 in `workspaces/<harness>--<model-slug>/` with the benchmark inputs in place, and `sandbox up` starts
 that evaluation's agent container and private Docker daemon around it. `run` drives Claude Code or
 OpenCode through the steps in that sandbox: each step becomes a tagged commit on the branch and a
@@ -79,5 +85,11 @@ kept in `runs/<branch>/`. OpenCode traces are written by the runner from OpenCod
 exports, as the `@mlflow/opencode` plugin does not load in OpenCode 2. After each session the
 objective checks (install, typecheck, lint, build, seed, compose, Dagster) run on a copy of the
 workspace in the sandbox; a session that fails, or whose work fails a check that passed after the
-previous step, gets one retry with the failure output. The reviewer is not implemented yet; see
-the milestones in [PLAN.md](PLAN.md).
+previous step, gets one retry with the failure output.
+
+`review` has Codex (`gpt-6.1-sol`) score each complete PromptDB phase against the rubric, blind to
+the harness and model, in a read-only copy of the code at the phase's last step. Each review is a
+child run of the branch's MLflow run, with the scores as metrics and as assessments on the judge's
+trace; `report` sets them next to each phase's cost, time and check results. The second judge
+(Claude Code) and the final whole-branch review are not implemented yet; see the milestones in
+[PLAN.md](PLAN.md).
