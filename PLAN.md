@@ -106,6 +106,16 @@ workspaces/                     # gitignored: one standalone git repo per eval b
   `session_model`, and their commits say so in `Assisted-by`. Flash is a smaller model than
   GLM-5.3, so phase scores from step 18 on are not GLM-5.3's. The `openrouter` provider in
   `opencode.json` reads its key from `OPEN_ROUTER_KEY`; OpenRouter reports no coin budget.
+- **Claude Code runs on OpenRouter models without prompt-cache markers.** A Claude Code model
+  named `openrouter/<model>` (Qwen3.8 Max, `openrouter/qwen/qwen3.8-max-0902`, added 2026-11-02)
+  runs on OpenRouter's Anthropic-compatible API with `OPEN_ROUTER_KEY`, every model tier and
+  subagent mapped to it, and `DISABLE_PROMPT_CACHING=1`, which the Claude-model runs do not set.
+  Alibaba, Qwen's provider there, caches every prompt for reuse by a later one with the same
+  prefix, but with Claude Code's `cache_control` marker on the newest message only the system
+  prompt and tools were ever read from cache: the first step 1 read 27% of its input from cache
+  and cost $6.36, against OpenCode's 98% and $1.60 on the same model. The setting only drops the
+  markers. Claude Code prices models it does not know at Claude's rates, so the driver logs
+  OpenRouter models' cost at OpenRouter's list prices.
 - At startup the runner checks each OpenCode model id against the provider's model list
   (`<baseURL>/models`, with the provider's settings from `opencode.json`) and refuses to start an
   evaluation for a model that isn't served. Claude Code models have no such list on a subscription;

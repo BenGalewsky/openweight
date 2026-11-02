@@ -78,6 +78,7 @@ def test_command() -> None:
 def test_command_without_effort() -> None:
     command = ClaudeHarness().command("x", Evaluation("claude", "claude-opus-5-5"), SESSION)
     assert "--effort" not in command
+    assert "DISABLE_PROMPT_CACHING=1" not in command
 
 
 def test_openrouter_command() -> None:
@@ -88,6 +89,8 @@ def test_openrouter_command() -> None:
     assert pairs["--model"] == "qwen/qwen3.8-max-0902"
     assert "ANTHROPIC_BASE_URL=https://openrouter.ai/api" in command[:claude]
     assert "ANTHROPIC_API_KEY=" in command[:claude]
+    # Claude Code's cache markers keep OpenRouter's providers from caching the conversation.
+    assert "DISABLE_PROMPT_CACHING=1" in command[:claude]
     assert "ANTHROPIC_DEFAULT_HAIKU_MODEL=qwen/qwen3.8-max-0902" in command[:claude]
     assert "CLAUDE_CODE_SUBAGENT_MODEL=qwen/qwen3.8-max-0902" in command[:claude]
     # The key is passed by name, never by value.

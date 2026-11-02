@@ -11,6 +11,12 @@ model tier Claude Code would pick on its own (subagents, background tasks) is ma
 under test, so no session calls reach a Claude model. Claude Code prices models it does not know
 at Claude's rates, so the cost of OpenRouter models (ids with a slash in ``modelUsage``) is taken
 from OpenRouter's list prices instead.
+
+OpenRouter sessions also run without Claude Code's ``cache_control`` markers
+(``DISABLE_PROMPT_CACHING=1``). Behind OpenRouter, Alibaba caches every prompt and reuses it for
+a later prompt with the same prefix, but with Claude Code's marker on the newest message only the
+system prompt and tools are ever read from cache: Qwen3.8 Max's first step 1 read 27% of its
+input from cache, where OpenCode, which sends no markers there, read 98%.
 """
 
 import json
@@ -101,6 +107,7 @@ class ClaudeHarness:
         return [
             "env", f"ANTHROPIC_BASE_URL={OPENROUTER_BASE_URL}", "ANTHROPIC_API_KEY=",
             *(f"{tier}={model}" for tier in MODEL_TIERS),
+            "DISABLE_PROMPT_CACHING=1",
             # The shell copies the key, so only its name is in the arguments.
             "sh", "-c", f'ANTHROPIC_AUTH_TOKEN="${OPENROUTER_KEY}" exec "$@"', "sh", *claude,
         ]  # fmt: skip
